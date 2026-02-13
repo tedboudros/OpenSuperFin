@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from core.bus import AsyncIOBus
@@ -71,7 +71,15 @@ class AIInterface:
         self._bus = bus
         self._portfolio = portfolio
         self._scheduler = scheduler
-        self._conversation_history: dict[str, list[dict]] = {}  # per-channel history
+        self._conversation_history: dict[str, list[dict]] = self._store.load_conversation_history()
+
+    def _append_message(self, channel_id: str, role: str, content: str) -> None:
+        """Append a message to in-memory and persisted history."""
+        self._conversation_history.setdefault(channel_id, []).append({
+            "role": role,
+            "content": content,
+        })
+        self._store.append_conversation_message(channel_id, role, content)
 
     async def handle_message(
         self,
@@ -88,12 +96,8 @@ class AIInterface:
         history = self._conversation_history.setdefault(channel_id, [])
 
         # Add user message
-        history.append({"role": "user", "content": text})
-
-        # Trim history to last 20 messages to keep context reasonable
-        if len(history) > 20:
-            history = history[-20:]
-            self._conversation_history[channel_id] = history
+        self._append_message(channel_id, "user", text)
+        history = self._conversation_history[channel_id]
 
         # Get LLM provider
         providers = self._registry.get_all("llm")
@@ -130,8 +134,13 @@ class AIInterface:
 
             # Add tool results to conversation and get final response
             tool_summary = "\n".join(tool_results)
-            history.append({"role": "assistant", "content": result.text or ""})
-            history.append({"role": "user", "content": f"Tool results:\n{tool_summary}\n\nSummarize what happened for the user."})
+            self._append_message(channel_id, "assistant", result.text or "")
+            self._append_message(
+                channel_id,
+                "user",
+                f"Tool results:\n{tool_summary}\n\nSummarize what happened for the user.",
+            )
+            history = self._conversation_history[channel_id]
 
             try:
                 final_response = await llm.complete(
@@ -141,12 +150,12 @@ class AIInterface:
                 logger.exception("Final response generation failed")
                 final_response = tool_summary
 
-            history.append({"role": "assistant", "content": final_response})
+            self._append_message(channel_id, "assistant", final_response)
             return final_response
         else:
             # No tool calls -- direct response
             response = result.text or "I'm not sure how to help with that."
-            history.append({"role": "assistant", "content": response})
+            self._append_message(channel_id, "assistant", response)
             return response
 
     async def _execute_tool(self, name: str, args: dict, source: str) -> str:
@@ -164,7 +173,7 @@ class AIInterface:
                 case "get_portfolio":
                     return self._tool_get_portfolio(args)
                 case "get_price":
-                    return self._tool_get_price(args)
+                    return await self._tool_get_price(args)
                 case "list_tasks":
                     return self._tool_list_tasks()
                 case "create_task":
@@ -287,12 +296,38 @@ class AIInterface:
 
         return "\n".join(parts) if parts else "No positions in either portfolio."
 
-    def _tool_get_price(self, args: dict) -> str:
+    async def _tool_get_price(self, args: dict) -> str:
         ticker = args["ticker"].upper()
         price = self._store.get_latest_price(ticker)
         if price:
             return f"{ticker}: ${price:,.2f}"
-        return f"No price data available for {ticker}. Market data may need to be synced."
+
+        # Fallback: fetch live data from market providers when cache is empty.
+        providers = self._registry.get_all("market_data")
+        now = datetime.now(timezone.utc)
+        start = now - timedelta(days=7)
+
+        candidates = [ticker]
+        if "-" not in ticker and "=" not in ticker and not ticker.startswith("^"):
+            candidates.extend([f"{ticker}-USD", f"{ticker}=X"])
+
+        for provider in providers:
+            for candidate in candidates:
+                if not provider.supports(candidate):
+                    continue
+                try:
+                    rows = await provider.fetch([candidate], start=start, end=now)
+                except Exception:
+                    logger.exception("Live price fetch failed for %s via %s", candidate, provider.name)
+                    continue
+                if not rows:
+                    continue
+
+                self._store.save_market_data(rows)
+                latest = max(rows, key=lambda r: r.timestamp)
+                return f"{latest.ticker}: ${latest.close:,.2f}"
+
+        return f"No price data available for {ticker}. No live quote returned from configured market data providers."
 
     def _tool_list_tasks(self) -> str:
         tasks = self._scheduler.list_tasks()

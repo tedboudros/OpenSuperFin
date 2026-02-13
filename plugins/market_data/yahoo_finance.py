@@ -81,10 +81,22 @@ class YahooFinanceProvider:
     def name(self) -> str:
         return "yahoo_finance"
 
+    def _normalize_ticker(self, ticker: str) -> str:
+        """Map common shorthand symbols to Yahoo's expected format."""
+        upper = ticker.upper()
+        aliases = {
+            "BTC": "BTC-USD",
+            "ETH": "ETH-USD",
+            "SOL": "SOL-USD",
+        }
+        return aliases.get(upper, upper)
+
     def supports(self, ticker: str) -> bool:
         """Yahoo Finance supports most traditional tickers."""
+        normalized = self._normalize_ticker(ticker)
         if self._tickers:
-            return ticker in self._tickers
+            normalized_list = {self._normalize_ticker(t) for t in self._tickers}
+            return normalized in normalized_list
         # Yahoo supports almost anything, so default to True
         return True
 
@@ -120,12 +132,13 @@ class YahooFinanceProvider:
             "includePrePost": "false",
         }
 
-        url = _CHART_URL.format(ticker=ticker)
+        query_ticker = self._normalize_ticker(ticker)
+        url = _CHART_URL.format(ticker=query_ticker)
         response = await self._client.get(url, params=params)
 
         if response.status_code != 200:
             logger.warning(
-                "Yahoo Finance returned %d for %s", response.status_code, ticker
+                "Yahoo Finance returned %d for %s", response.status_code, query_ticker
             )
             return []
 
@@ -135,7 +148,7 @@ class YahooFinanceProvider:
 
         if not result:
             error = chart.get("error", {})
-            logger.warning("Yahoo Finance error for %s: %s", ticker, error)
+            logger.warning("Yahoo Finance error for %s: %s", query_ticker, error)
             return []
 
         return self._parse_chart_result(ticker, result[0])

@@ -79,6 +79,17 @@ class Store:
                 ON memory_index(ticker);
             CREATE INDEX IF NOT EXISTS idx_memory_created
                 ON memory_index(created_at);
+
+            CREATE TABLE IF NOT EXISTS conversation_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_conversation_channel_created
+                ON conversation_messages(channel_id, created_at, id);
         """)
         self._db.commit()
         logger.info("SQLite initialized at %s", self._db_path)
@@ -243,6 +254,36 @@ class Store:
         ).fetchall()
 
         return [row["id"] for row in rows]
+
+    # ------------------------------------------------------------------
+    # Conversation history (SQLite)
+    # ------------------------------------------------------------------
+
+    def append_conversation_message(self, channel_id: str, role: str, content: str) -> None:
+        """Append one chat message to persistent conversation history."""
+        self.db.execute(
+            """INSERT INTO conversation_messages (channel_id, role, content, created_at)
+               VALUES (?, ?, ?, ?)""",
+            (channel_id, role, content, datetime.now().isoformat()),
+        )
+        self.db.commit()
+
+    def load_conversation_history(self) -> dict[str, list[dict]]:
+        """Load full persisted conversation history for all channels."""
+        rows = self.db.execute(
+            """SELECT channel_id, role, content
+               FROM conversation_messages
+               ORDER BY channel_id ASC, created_at ASC, id ASC"""
+        ).fetchall()
+
+        history: dict[str, list[dict]] = {}
+        for row in rows:
+            channel = row["channel_id"]
+            history.setdefault(channel, []).append({
+                "role": row["role"],
+                "content": row["content"],
+            })
+        return history
 
     # ------------------------------------------------------------------
     # File operations (JSON, Markdown, JSONL)

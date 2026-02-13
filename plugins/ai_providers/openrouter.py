@@ -30,11 +30,7 @@ PLUGIN_META = {
 4. Create a new API key
 5. Paste it below
 
-OpenRouter provides access to many models through one API. Popular models:
-  - openai/gpt-4o
-  - anthropic/claude-sonnet-4-20250514
-  - google/gemini-2.0-flash-thinking-exp:free
-  - meta-llama/llama-3.3-70b-instruct
+OpenRouter provides access to many models through one API (e.g., openai/gpt-4o).
 """,
     "config_fields": [
         {
@@ -51,9 +47,9 @@ OpenRouter provides access to many models through one API. Popular models:
             "label": "Model",
             "type": "string",
             "required": False,
-            "default": "anthropic/claude-sonnet-4-20250514",
+            "default": "openai/gpt-4o",
             "description": "Model identifier (provider/model format)",
-            "placeholder": "anthropic/claude-sonnet-4-20250514",
+            "placeholder": "openai/gpt-4o",
         },
         {
             "key": "temperature",
@@ -79,7 +75,7 @@ class OpenRouterProvider:
     def __init__(
         self,
         api_key: str,
-        model: str = "anthropic/claude-sonnet-4-20250514",
+        model: str = "openai/gpt-4o",
         base_url: str = _DEFAULT_URL,
         max_tokens: int = 4096,
         temperature: float = 0.3,
