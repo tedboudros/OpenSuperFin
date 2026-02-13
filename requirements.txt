@@ -1,0 +1,10 @@
+# Core dependencies (5 packages)
+pydantic>=2.0
+pyyaml>=6.0
+python-dotenv>=1.0
+aiohttp>=3.9
+httpx>=0.27
+
+# Plugin dependencies (install only what you use)
+# python-telegram-bot>=21.0    # Telegram integration
+# yfinance>=0.2                # Yahoo Finance market data
