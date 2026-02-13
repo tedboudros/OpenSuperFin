@@ -143,10 +143,12 @@ fi
 ok "CLI command installed: opensuperfin"
 
 # -------------------------------------------------------------------
-# Step 6: Run setup wizard
+# Done!
 # -------------------------------------------------------------------
 echo ""
-info "Starting setup wizard..."
+ok "Installation complete!"
 echo ""
-
-"$BIN_DIR/opensuperfin" setup
+echo -e "  Run this now to configure OpenSuperFin:"
+echo ""
+echo -e "    ${BOLD}opensuperfin setup${NC}"
+echo ""
