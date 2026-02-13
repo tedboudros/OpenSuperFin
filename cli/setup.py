@@ -77,11 +77,6 @@ def run_setup(home_dir: Path | None = None) -> None:
             # Auto-enable, but still let user configure
             enabled_plugins.extend(plugins)
 
-    if not any(p.category == "ai_provider" for p in enabled_plugins):
-        print("\n  You need at least one AI provider to use OpenSuperFin.")
-        print("  Re-run 'opensuperfin setup' and select a provider.\n")
-        sys.exit(1)
-
     # Step 4: Configure each selected plugin
     print()
     for plugin in enabled_plugins:
@@ -156,6 +151,7 @@ def run_plugin_setup(plugin_name: str) -> None:
 def _select_plugins(category: str, plugins: list[PluginInfo]) -> list[PluginInfo]:
     """Show a checkbox list for selecting plugins in a category."""
     label = CATEGORY_LABELS.get(category, category)
+    required = category == "ai_provider"
 
     choices = [
         Choice(
@@ -166,17 +162,22 @@ def _select_plugins(category: str, plugins: list[PluginInfo]) -> list[PluginInfo
         for p in plugins
     ]
 
-    selected = questionary.checkbox(
-        f"Select {label}:",
-        choices=choices,
-        style=STYLE,
-        instruction="(arrow keys to move, space to toggle, enter to confirm)",
-    ).ask()
+    while True:
+        selected = questionary.checkbox(
+            f"Select {label}:",
+            choices=choices,
+            style=STYLE,
+            instruction="(use SPACE to select, ENTER to confirm)",
+        ).ask()
 
-    if selected is None:
-        _abort()
+        if selected is None:
+            _abort()
 
-    return selected  # type: ignore[return-value]
+        if required and not selected:
+            print("  Please select at least one. Use SPACE to toggle selection, then ENTER.")
+            continue
+
+        return selected  # type: ignore[return-value]
 
 
 def _configure_plugin(plugin: PluginInfo) -> dict[str, Any] | None:
