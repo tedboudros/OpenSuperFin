@@ -50,6 +50,7 @@ graph LR
         OUT --- OUT3[WebhookOutput]
         LLM --- LLM1[OpenAI]
         LLM --- LLM2[Anthropic]
+        LLM --- LLM3[OpenRouter]
         LLM --- LLM3[Google]
         LLM --- LLM4[LocalModel]
         AIA --- AIA1[MacroStrategist]
@@ -387,7 +388,7 @@ class LLMProvider(Protocol):
     async def tool_call(self, messages: list[dict], tools: list[dict]) -> ToolResult: ...
 ```
 
-Implementations call LLM APIs via `httpx`. No SDK dependencies required. Add any provider by implementing this protocol: OpenAI, Anthropic, Google, Mistral, local models via Ollama, etc.
+Implementations call LLM APIs via `httpx`. No SDK dependencies required. Add any provider by implementing this protocol: OpenAI, Anthropic, OpenRouter (unified API for many models), Google, Mistral, local models via Ollama, etc.
 
 ### AI Agent Protocol
 

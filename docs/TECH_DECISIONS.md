@@ -163,7 +163,7 @@ Key decisions, alternatives considered, and reasoning.
 | `MarketDataProvider` | Price/market data fetching | Yahoo Finance, CoinGecko, etc. |
 | `InputAdapter` | Receiving external data | Telegram, Email, Webhooks, Scrapers |
 | `OutputAdapter` | Delivering signals outward | Telegram, Email, Webhooks |
-| `LLMProvider` | Language model API calls | OpenAI, Anthropic, Google, local |
+| `LLMProvider` | Language model API calls | OpenAI, Anthropic, OpenRouter, Google, local |
 | `AIAgent` | Analysis logic | Macro, Rates, Company agents |
 | `RiskRule` | Signal validation rules | Confidence, Concentration, Drawdown |
 | `TaskHandler` | Scheduled task execution | Monitoring, DataSync, Comparison |
@@ -195,10 +195,10 @@ Key decisions, alternatives considered, and reasoning.
 
 ## ADR-12: LLM API Calls via httpx (No SDKs Required)
 
-**Decision**: Call LLM APIs directly via `httpx` HTTP requests. OpenAI/Anthropic SDKs are optional.
+**Decision**: Call LLM APIs directly via `httpx` HTTP requests. OpenAI/Anthropic/OpenRouter SDKs are optional.
 
 **Rationale**:
-- The OpenAI and Anthropic APIs are simple JSON-over-HTTP
+- The OpenAI, Anthropic, and OpenRouter APIs are simple JSON-over-HTTP
 - Direct calls via `httpx` avoid SDK dependencies and version churn
 - The `LLMProvider` protocol abstracts the API shape
 - SDKs can be used if already installed, but aren't required
