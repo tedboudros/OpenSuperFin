@@ -290,8 +290,8 @@ class SeleniumBrowserHandler:
                 "function": {
                     "name": "get_browser_screenshot",
                     "description": (
-                        "Capture current browser viewport screenshot. "
-                        "Returns only a single image_url payload with a base64 data URL."
+                        "Capture current browser viewport screenshot and return detailed "
+                        "visual analysis text produced by an auxiliary LLM image pass."
                     ),
                     "parameters": {"type": "object", "properties": {}},
                 },
@@ -331,7 +331,12 @@ class SeleniumBrowserHandler:
         if name == "run_selenium_code":
             return await self._tool_run_code(args)
         if name == "get_browser_screenshot":
-            return await self._tool_screenshot(args)
+            return await self._tool_screenshot(
+                args,
+                interface=interface,
+                source=source,
+                channel_id=channel_id,
+            )
         if name == "get_page_code":
             return await self._tool_page_code(args)
         return None
@@ -563,10 +568,58 @@ class SeleniumBrowserHandler:
                 lines.append(f"result: {self._redact_sensitive(str(result))}")
             return "\n".join(lines)
 
-    async def _tool_screenshot(self, args: dict) -> str:
-        return await asyncio.to_thread(self._screenshot_sync, args)
+    async def _tool_screenshot(
+        self,
+        args: dict,
+        interface: object | None = None,
+        source: str | None = None,
+        channel_id: str | None = None,
+    ) -> str:
+        capture = await asyncio.to_thread(self._capture_screenshot_sync)
+        if isinstance(capture, str):
+            return capture
 
-    def _screenshot_sync(self, args: dict) -> str:
+        png_bytes = capture["png_bytes"]
+        url = capture["url"]
+        title = capture["title"]
+        encoded = base64.b64encode(png_bytes).decode("ascii")
+        data_url = f"data:image/png;base64,{encoded}"
+
+        analysis = ""
+        describe = getattr(interface, "describe_image_for_tool", None)
+        if callable(describe):
+            try:
+                maybe = describe(
+                    data_url=data_url,
+                    tool_name="get_browser_screenshot",
+                    source=source or "unknown",
+                    channel_id=channel_id or "default",
+                    context={
+                        "url": url,
+                        "title": title,
+                    },
+                )
+                if asyncio.iscoroutine(maybe):
+                    maybe = await maybe
+                analysis = str(maybe or "").strip()
+            except Exception:
+                logger.exception("Auxiliary screenshot analysis failed")
+
+        if not analysis:
+            analysis = (
+                "Screenshot captured, but visual analysis is unavailable. "
+                "Try again after confirming an LLM provider with image support is configured."
+            )
+
+        lines = ["Screenshot analysis:"]
+        if url:
+            lines.append(f"URL: {url}")
+        if title:
+            lines.append(f"Title: {title}")
+        lines.append(analysis)
+        return "\n".join(lines)
+
+    def _capture_screenshot_sync(self) -> dict[str, Any] | str:
         with self._lock:
             if self._driver is None:
                 return "No active browser session. Use open_browser first."
@@ -576,15 +629,22 @@ class SeleniumBrowserHandler:
             except Exception as exc:
                 return f"Failed to capture screenshot: {exc}"
 
-            encoded = base64.b64encode(png_bytes).decode("ascii")
-            payload = {
-                "type": "image_url",
-                "image_url": {
-                    "url": f"data:image/png;base64,{encoded}",
-                    "detail": "auto",
-                },
+            url = ""
+            title = ""
+            try:
+                url = self._driver.current_url or ""
+            except Exception:
+                pass
+            try:
+                title = self._driver.title or ""
+            except Exception:
+                pass
+
+            return {
+                "png_bytes": png_bytes,
+                "url": url,
+                "title": title,
             }
-            return json.dumps(payload, separators=(",", ":"))
 
     async def _tool_page_code(self, args: dict) -> str:
         return await asyncio.to_thread(self._page_code_sync, args)

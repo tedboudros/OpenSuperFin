@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from inspect import isawaitable
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -258,6 +257,76 @@ class AIInterface:
             + "\n\n".join(sections)
         )
 
+    async def describe_image_for_tool(
+        self,
+        data_url: str,
+        tool_name: str,
+        source: str = "unknown",
+        channel_id: str = "default",
+        context: dict[str, Any] | None = None,
+    ) -> str:
+        """Run an auxiliary image analysis LLM pass and return text-only output."""
+        if not data_url.startswith("data:image/"):
+            return "Invalid image payload."
+
+        providers = self._registry.get_all("llm")
+        if not providers:
+            return "No LLM provider configured for screenshot analysis."
+
+        # Prefer a secondary provider when available; otherwise reuse primary.
+        analyzer: LLMProvider = providers[1] if len(providers) > 1 else providers[0]
+
+        details: list[str] = [
+            "You are a visual browser state analyzer for ClawQuant.",
+            "Return a detailed, objective description of what is visible in this screenshot.",
+            "Focus on actionable UI state: banners, overlays/modals, disabled controls, input fields, buttons, error messages, nav state, and anything blocking progress.",
+            "Do not guess hidden content. Distinguish clearly between visible facts and inferences.",
+            "Output plain text only; no markdown tables; no JSON.",
+        ]
+        if context:
+            url = str(context.get("url", "")).strip()
+            title = str(context.get("title", "")).strip()
+            if url:
+                details.append(f"Current URL: {url}")
+            if title:
+                details.append(f"Page title: {title}")
+
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": "\n".join(details)},
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            f"Analyze this screenshot from tool `{tool_name}` and provide a thorough, "
+                            "step-driving UI description for the main agent."
+                        ),
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": data_url,
+                            "detail": "auto",
+                        },
+                    },
+                ],
+            },
+        ]
+
+        try:
+            analyzed = await analyzer.complete(messages, max_tokens=900, temperature=0.0)
+        except Exception:
+            logger.exception(
+                "Auxiliary image analysis failed (tool=%s source=%s channel=%s)",
+                tool_name,
+                source,
+                channel_id,
+            )
+            return "Screenshot captured, but analysis failed."
+        text = str(analyzed or "").strip()
+        return text or "Screenshot captured, but analysis returned empty output."
+
     async def _run_tool_loop(
         self,
         llm: LLMProvider,
@@ -312,7 +381,6 @@ class AIInterface:
                 )
 
             tool_results: list[str] = []
-            multimodal_followups: list[dict[str, Any]] = []
             for idx, tc in enumerate(result.tool_calls):
                 func = tc.get("function", tc)
                 tool_name = str(func.get("name", ""))
@@ -338,15 +406,8 @@ class AIInterface:
                         content=tool_message_content,
                         tool_call_id=tool_call_id,
                     )
-                multimodal_followups.extend(
-                    self._build_tool_result_followup_messages(
-                        tool_name=tool_name,
-                        tool_result=raw_tool_result,
-                    )
-                )
 
             last_tool_summary = "\n".join(tool_results) if tool_results else "No tool output."
-            messages.extend(multimodal_followups)
 
         max_rounds_notice = (
             "[INTERNAL SYSTEM ERROR] Max tool call rounds reached, "
@@ -504,84 +565,19 @@ class AIInterface:
             return f"Error executing {name}: {e}"
 
     @staticmethod
-    def _extract_base64_data_url(tool_result: str) -> str | None:
-        text = (tool_result or "").strip()
-        if not text:
-            return None
-
-        # Preferred: structured JSON payload from tool output.
-        if text.startswith("{") and text.endswith("}"):
-            try:
-                payload = json.loads(text)
-            except json.JSONDecodeError:
-                payload = None
-            if isinstance(payload, dict):
-                if payload.get("type") == "image_url":
-                    image_url = payload.get("image_url")
-                    if isinstance(image_url, dict):
-                        raw = str(image_url.get("url", "")).strip()
-                    else:
-                        raw = ""
-                else:
-                    raw = str(payload.get("base64_data_url", "")).strip()
-                if raw.startswith("data:image/") and ";base64," in raw:
-                    return raw
-
-        # Backward-compatible: parse line-based output.
-        match = re.search(
-            r"base64_data_url:\s*(data:image/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+)",
-            text,
-        )
-        if not match:
-            return None
-        return match.group(1).strip()
-
-    @staticmethod
     def _summarize_tool_result_for_text(tool_name: str, tool_result: str) -> str:
         """Remove oversized payload lines from textual tool summaries."""
         if tool_name != "get_browser_screenshot":
             return tool_result
-        text = (tool_result or "").strip()
-        if text.startswith("{") and text.endswith("}"):
-            try:
-                payload = json.loads(text)
-            except json.JSONDecodeError:
-                payload = None
-            if isinstance(payload, dict) and payload.get("type") == "image_url":
-                image_url = payload.get("image_url")
-                if isinstance(image_url, dict):
-                    url = str(image_url.get("url", "")).strip()
-                    if url.startswith("data:image/") and ";base64," in url:
-                        return "Screenshot captured.\nImage payload: attached for multimodal reasoning."
-
         lines = []
-        had_full_image_payload = False
-        had_truncated_image_payload = False
         for line in tool_result.splitlines():
             lowered = line.strip().lower()
             if lowered.startswith("base64_data_url:"):
-                had_full_image_payload = True
-                continue
-            if lowered.startswith("base64_truncated: true"):
-                had_truncated_image_payload = True
-                continue
-            if lowered.startswith("base64_truncated: false"):
-                continue
-            if lowered.startswith("base64_chars_total:"):
-                continue
-            if lowered.startswith("base64_chars_returned:"):
-                continue
-            if lowered.startswith("base64_preview:"):
-                had_truncated_image_payload = True
                 continue
             if lowered.startswith("base64_note:"):
                 continue
             lines.append(line)
-        if had_full_image_payload:
-            lines.append("Image payload: attached for multimodal reasoning.")
-        elif had_truncated_image_payload:
-            lines.append("Image payload: unavailable (truncated). Increase max_base64_chars to attach.")
-        return "\n".join(lines)
+        return "\n".join(lines).strip() or tool_result
 
     @staticmethod
     def _build_tool_message_content(
@@ -590,55 +586,7 @@ class AIInterface:
         summary_tool_result: str,
     ) -> Any:
         """Construct provider-facing tool message content."""
-        if tool_name != "get_browser_screenshot":
-            return summary_tool_result
-
-        data_url = AIInterface._extract_base64_data_url(raw_tool_result)
-        if data_url:
-            return [{
-                "type": "image_url",
-                "image_url": {
-                    "url": data_url,
-                    "detail": "auto",
-                },
-            }]
-
-        # Fall back to raw payload if screenshot output is malformed.
-        return raw_tool_result
-
-    def _build_tool_result_followup_messages(
-        self,
-        tool_name: str,
-        tool_result: str,
-    ) -> list[dict[str, Any]]:
-        """Build extra multimodal follow-up messages from tool output when useful."""
-        if tool_name != "get_browser_screenshot":
-            return []
-
-        data_url = self._extract_base64_data_url(tool_result)
-        if not data_url:
-            return []
-
-        return [{
-            "role": "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": (
-                        "Tool image context from get_browser_screenshot. "
-                        "Use this screenshot to reason about visible banners/modals/overlays "
-                        "and choose next browser actions."
-                    ),
-                },
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": data_url,
-                        "detail": "auto",
-                    },
-                },
-            ],
-        }]
+        return summary_tool_result
 
     def _iter_plugins(self) -> list[Any]:
         """Return registered plugin instances across protocol registries."""
