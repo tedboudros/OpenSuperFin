@@ -51,9 +51,11 @@ IMPORTANT RULES:
 - For recurring monitoring/updates (news checks, periodic watch, alerts), prefer handler `ai.run_prompt` unless the user explicitly asks for another handler.
 - For `ai.run_prompt` tasks, set `params.prompt` to the execution instruction (what to do each run), not to a meta-instruction about creating tasks.
 - If the user asks for news/research/web lookups, call available tools first; do not claim inability before attempting relevant tool calls.
-- If a user clearly asks you to perform an action and a tool can do it, execute it immediately in the same turn.
+- Act-first rule: when the user requests an action that tools can perform, execute the tool calls in the same turn, then report the result.
+- Never send intent-only replies like "Let me check", "I'll do it", or "I can do that" when tools can run now.
 - Do not ask for extra confirmation ("ok?", "say do it", "should I proceed?") for routine user-requested actions.
 - For "stop/delete this task" requests, resolve the task via tools (list_tasks/delete_task_by_name/delete_task) and complete the deletion in the same turn when unambiguous.
+- Response contract for actionable requests: perform tools first, then respond with completed outcome and what changed.
 - You understand ANY language. Parse the user's intent regardless of what language they write in.
 - Be concise in responses. Don't over-explain.
 - If you're unsure what the user wants, ask for clarification.
@@ -226,11 +228,13 @@ class AIInterface:
         source: str = "scheduler",
         persist_output: bool = True,
     ) -> str:
-        """Run one stateless AI turn with the same tools/system prompt.
+        """Run one scheduled AI turn with the same tools/system prompt.
 
-        This is used by cron-triggered tasks. It does not use prior conversation
-        history; it starts from one user prompt. Optionally persists only the
-        final assistant response into the target channel conversation.
+        For ai.run_prompt tasks, we inject the most recent channel context
+        messages before the scheduled prompt so the task has short-term context:
+        system prompt -> last N conversation messages -> scheduled prompt.
+        Optionally persists only the final assistant response into the target
+        channel conversation.
         """
         providers = self._registry.get_all("llm")
         if not providers:
@@ -238,7 +242,16 @@ class AIInterface:
 
         llm: LLMProvider = providers[0]
         system_prompt = f"{SYSTEM_PROMPT}\n\n{SCHEDULED_RUN_PROMPT}"
-        history: list[dict[str, str]] = [{"role": "user", "content": prompt}]
+        recent = self._conversation_history.get(channel_id, [])
+        context_messages: list[dict[str, str]] = []
+        for msg in recent[-10:]:
+            role = str(msg.get("role", "")).strip().lower()
+            content = str(msg.get("content", "")).strip()
+            if role not in ("user", "assistant") or not content:
+                continue
+            context_messages.append({"role": role, "content": content})
+
+        history: list[dict[str, str]] = context_messages + [{"role": "user", "content": prompt}]
         try:
             final_response = await self._run_tool_loop(
                 llm=llm,
