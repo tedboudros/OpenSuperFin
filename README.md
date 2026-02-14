@@ -62,6 +62,9 @@ The long-term product vision (including dual AI/human portfolios, divergence lea
 ## Quick Start
 
 ```bash
+# One-line install (checks Python 3.11+, clones repo, creates venv, installs deps, runs setup wizard)
+curl -fsSL https://raw.githubusercontent.com/tedboudros/ClawQuant/main/install.sh | bash
+
 # Interactive setup wizard
 clawquant setup
 
@@ -86,7 +89,7 @@ Run `clawquant setup` for first-time setup, or `clawquant config` to re-run it. 
 - `~/.clawquant/config.yaml`
 - `~/.clawquant/.env`
 
-On first setup, it also asks whether to enable startup auto-updates (`git pull` before `clawquant start`).
+Setup asks whether to enable startup auto-updates (`git pull` before `clawquant start`), defaulting to your current setting on re-runs.
 
 Useful commands:
 
@@ -116,4 +119,24 @@ See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for details.
 
 ## License
 
-MIT
+MIT License
+
+Copyright (c) 2026 ClawQuant
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

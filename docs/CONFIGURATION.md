@@ -17,7 +17,7 @@ clawquant setup
 What setup does today:
 - Discovers plugins from `PLUGIN_META`
 - Prompts for config fields
-- On first setup, asks whether startup auto-update should be enabled
+- Asks whether startup auto-update should be enabled (defaults to current value on re-runs)
 - Lets you skip sections if required fields already exist
 - Runs plugin-specific setup flows where needed (e.g., selenium saved login profiles)
 - Writes `config.yaml` and `.env`

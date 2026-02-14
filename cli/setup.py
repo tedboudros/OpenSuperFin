@@ -62,16 +62,14 @@ def run_setup(home_dir: Path | None = None) -> None:
     existing_auto_update, existing_install_commit = _load_existing_update_settings(home_dir)
     install_commit = existing_install_commit or _detect_install_commit()
 
-    if first_setup:
-        auto_update = questionary.confirm(
-            "Enable automatic updates on startup? (runs `git pull` before `clawquant start`)",
-            default=True,
-            style=STYLE,
-        ).ask()
-        if auto_update is None:
-            _abort()
-    else:
-        auto_update = existing_auto_update
+    auto_update_default = True if first_setup else existing_auto_update
+    auto_update = questionary.confirm(
+        "Enable automatic updates on startup? (runs `git pull` before `clawquant start`)",
+        default=auto_update_default,
+        style=STYLE,
+    ).ask()
+    if auto_update is None:
+        _abort()
 
     # Step 2: Discover all available plugins
     all_plugins = discover_plugins()
