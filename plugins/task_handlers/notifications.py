@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import logging
 
+from core.bus import AsyncIOBus
+from core.models.events import Event, EventTypes
 from core.models.tasks import TaskResult
-from core.registry import PluginRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -16,8 +17,8 @@ logger = logging.getLogger(__name__)
 class NotificationsHandler:
     """Send scheduled notification messages to output adapters."""
 
-    def __init__(self, registry: PluginRegistry) -> None:
-        self._registry = registry
+    def __init__(self, bus: AsyncIOBus) -> None:
+        self._bus = bus
 
     @property
     def name(self) -> str:
@@ -32,26 +33,18 @@ class NotificationsHandler:
             )
 
         channel_id = params.get("channel_id")
-        outputs = self._registry.get_all("output")
-        sent = 0
-
-        for output in outputs:
-            send_text = getattr(output, "send_text", None)
-            if send_text is None:
-                continue
-            try:
-                await send_text(message, channel_id=channel_id)
-                sent += 1
-            except Exception:
-                logger.exception("Failed to send notification via %s", getattr(output, "name", "unknown"))
-
-        if sent == 0:
-            return TaskResult(
-                status="error",
-                message="No compatible output adapters available for text notifications",
-            )
+        adapter = params.get("adapter")
+        await self._bus.publish(Event(
+            type=EventTypes.INTEGRATION_OUTPUT,
+            source=self.name,
+            payload={
+                "text": message,
+                "channel_id": channel_id,
+                "adapter": adapter,
+            },
+        ))
 
         return TaskResult(
             status="success",
-            message=f"Delivered notification via {sent} output adapter(s)",
+            message="Queued notification for delivery via integration.output",
         )

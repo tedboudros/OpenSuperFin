@@ -10,6 +10,8 @@ from xml.etree import ElementTree
 
 import httpx
 
+from core.bus import AsyncIOBus
+from core.models.events import Event, EventTypes
 from core.models.tasks import TaskResult
 from core.registry import PluginRegistry
 
@@ -131,8 +133,9 @@ def _parse_rss_items(xml_text: str) -> list[dict]:
 class NewsBriefHandler:
     """Scheduled handler that sends a market news briefing."""
 
-    def __init__(self, registry: PluginRegistry, default_limit: int = 8) -> None:
+    def __init__(self, registry: PluginRegistry, bus: AsyncIOBus, default_limit: int = 8) -> None:
         self._registry = registry
+        self._bus = bus
         self._default_limit = default_limit
 
     @property
@@ -201,6 +204,7 @@ class NewsBriefHandler:
         limit = int(params.get("limit", self._default_limit))
         as_of = params.get("as_of")
         channel_id = params.get("channel_id")
+        adapter = params.get("adapter")
         summarize = bool(params.get("summarize", True))
 
         headlines = await fetch_market_news(topic=topic, limit=limit, as_of=as_of)
@@ -213,27 +217,19 @@ class NewsBriefHandler:
             if summary:
                 message = f"{message}\n\n*Quick Read*\n{summary}"
 
-        outputs = self._registry.get_all("output")
-        sent = 0
-        for output in outputs:
-            send_text = getattr(output, "send_text", None)
-            if send_text is None:
-                continue
-            try:
-                await send_text(message, channel_id=channel_id)
-                sent += 1
-            except Exception:
-                logger.exception("Failed sending news via %s", getattr(output, "name", "unknown"))
-
-        if sent == 0:
-            return TaskResult(
-                status="error",
-                message="No compatible output adapters available for news delivery",
-            )
+        await self._bus.publish(Event(
+            type=EventTypes.INTEGRATION_OUTPUT,
+            source=self.name,
+            payload={
+                "text": message,
+                "channel_id": channel_id,
+                "adapter": adapter,
+            },
+        ))
 
         return TaskResult(
             status="success",
-            message=f"Delivered news briefing via {sent} output adapter(s)",
+            message="Queued news briefing for delivery via integration.output",
         )
 
     def _format_message(self, headlines: list[dict], topic: str | None = None) -> str:

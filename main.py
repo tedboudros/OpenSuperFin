@@ -16,6 +16,8 @@ from aiohttp import web
 from core.bus import AsyncIOBus
 from core.config import load_config
 from core.data.store import Store
+from core.models.events import Event, EventTypes
+from core.output_dispatcher import OutputDispatcher
 from core.registry import PluginRegistry
 from engine.interface import AIInterface
 from risk.portfolio import PortfolioTracker
@@ -178,10 +180,15 @@ async def _load_plugins(config, bus, store, registry, ai_interface: AIInterface)
 
     # 5. Load task handlers
     try:
+        from plugins.task_handlers.ai_runner import AIRunnerHandler
         from plugins.task_handlers.comparison import ComparisonHandler
         from plugins.task_handlers.news import NewsBriefHandler
         from plugins.task_handlers.notifications import NotificationsHandler
         from plugins.task_handlers.web_search import WebSearchHandler
+
+        ai_runner_handler = AIRunnerHandler(ai_interface=ai_interface, bus=bus)
+        registry.register("task_handler", ai_runner_handler)
+        logger.info("Loaded task handler: %s", ai_runner_handler.name)
 
         handler = ComparisonHandler(
             store=store,
@@ -192,11 +199,11 @@ async def _load_plugins(config, bus, store, registry, ai_interface: AIInterface)
         registry.register("task_handler", handler)
         logger.info("Loaded task handler: %s", handler.name)
 
-        notifications_handler = NotificationsHandler(registry=registry)
+        notifications_handler = NotificationsHandler(bus=bus)
         registry.register("task_handler", notifications_handler)
         logger.info("Loaded task handler: %s", notifications_handler.name)
 
-        news_handler = NewsBriefHandler(registry=registry)
+        news_handler = NewsBriefHandler(registry=registry, bus=bus)
         registry.register("task_handler", news_handler)
         logger.info("Loaded task handler: %s", news_handler.name)
 
@@ -231,13 +238,58 @@ async def _load_plugins(config, bus, store, registry, ai_interface: AIInterface)
                         source="telegram",
                     )
                     if response:
-                        await tg.send_text(response, channel_id=channel_id)
+                        await bus.publish(Event(
+                            type=EventTypes.INTEGRATION_OUTPUT,
+                            source="interface",
+                            payload={
+                                "text": response,
+                                "channel_id": channel_id,
+                                "adapter": "telegram",
+                            },
+                        ))
 
                 instance.on_message(_handle_message)
                 registry.register("input", instance)
                 registry.register("output", instance)
 
                 # Start the integration (begins polling)
+                await instance.start()
+                logger.info("Loaded and started integration: %s", integration_name)
+            elif integration_name == "discord":
+                from plugins.integrations.discord import DiscordIntegration
+
+                instance = DiscordIntegration(
+                    bot_token=integration_config["bot_token"],
+                    channels=integration_config.get("channels", []),
+                    poll_interval_seconds=int(integration_config.get("poll_interval_seconds", 3)),
+                )
+
+                async def _handle_discord(payload: dict, dc: DiscordIntegration = instance) -> None:
+                    text = (payload.get("text") or "").strip()
+                    if not text:
+                        return
+
+                    channel_id = payload.get("channel_id") or payload.get("chat_id") or "default"
+                    response = await ai_interface.handle_message(
+                        text=text,
+                        channel_id=channel_id,
+                        source="discord",
+                    )
+                    if response:
+                        await bus.publish(Event(
+                            type=EventTypes.INTEGRATION_OUTPUT,
+                            source="interface",
+                            payload={
+                                "text": response,
+                                "channel_id": channel_id,
+                                "adapter": "discord",
+                            },
+                        ))
+
+                instance.on_message(_handle_discord)
+                registry.register("input", instance)
+                registry.register("output", instance)
+
                 await instance.start()
                 logger.info("Loaded and started integration: %s", integration_name)
         except Exception as e:
@@ -279,6 +331,10 @@ async def run(config_path: str | None = None, env_path: str | None = None) -> No
     # Load and register plugins based on config
     await _load_plugins(config, bus, store, registry, ai_interface)
     logger.info("Plugin registry: %s", registry.summary())
+
+    # Generic integration.output delivery pipeline (adapter-agnostic)
+    output_dispatcher = OutputDispatcher(registry=registry)
+    bus.subscribe(EventTypes.INTEGRATION_OUTPUT, output_dispatcher.handle_integration_output)
 
     # Create HTTP server
     app = create_app(

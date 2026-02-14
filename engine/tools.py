@@ -154,6 +154,17 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "list_task_handlers",
+            "description": "List all registered task handler names that can be used in create_task.handler.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "create_task",
             "description": "Create a new scheduled task.",
             "parameters": {
@@ -170,7 +181,7 @@ TOOLS = [
                     },
                     "handler": {
                         "type": "string",
-                        "description": "Registered task handler name",
+                        "description": "Registered task handler name from list_task_handlers (e.g., ai.run_prompt)",
                     },
                     "cron_expression": {
                         "type": "string",

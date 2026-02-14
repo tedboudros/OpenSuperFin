@@ -38,6 +38,7 @@ You help the user manage their trading activity. You can:
 - Show portfolio state (get_portfolio)
 - Look up prices (get_price)
 - Manage scheduled tasks (list_tasks, create_task, delete_task)
+- List schedulable handlers (list_task_handlers)
 - View learning memories (get_memories)
 - Trigger analysis (run_analysis)
 - Show recent signals (get_signals)
@@ -46,6 +47,7 @@ IMPORTANT RULES:
 - When the user tells you about a trade they made, use the appropriate tool to record it.
 - When they ask about their portfolio or positions, use get_portfolio.
 - When they want to skip a signal, use skip_trade and record their reason.
+- Before creating a scheduled task, use list_task_handlers and choose a valid handler name.
 - You understand ANY language. Parse the user's intent regardless of what language they write in.
 - Be concise in responses. Don't over-explain.
 - If you're unsure what the user wants, ask for clarification.
@@ -132,7 +134,7 @@ class AIInterface:
                     except json.JSONDecodeError:
                         args = {}
 
-                tool_result = await self._execute_tool(tool_name, args, source)
+                tool_result = await self._execute_tool(tool_name, args, source, channel_id)
                 tool_results.append(f"[{tool_name}]: {tool_result}")
 
             # Add tool results to conversation and get final response
@@ -161,7 +163,71 @@ class AIInterface:
             self._append_message(channel_id, "assistant", response)
             return response
 
-    async def _execute_tool(self, name: str, args: dict, source: str) -> str:
+    async def handle_scheduled_prompt(
+        self,
+        prompt: str,
+        channel_id: str = "default",
+        source: str = "scheduler",
+        persist_output: bool = True,
+    ) -> str:
+        """Run one stateless AI turn with the same tools/system prompt.
+
+        This is used by cron-triggered tasks. It does not use prior conversation
+        history; it starts from one user prompt. Optionally persists only the
+        final assistant response into the target channel conversation.
+        """
+        providers = self._registry.get_all("llm")
+        if not providers:
+            return "No AI provider configured. Please set up an LLM provider in config.yaml."
+
+        llm: LLMProvider = providers[0]
+        system_prompt = SYSTEM_PROMPT
+        history: list[dict[str, str]] = [{"role": "user", "content": prompt}]
+        messages = [{"role": "system", "content": system_prompt}] + history
+        available_tools = TOOLS + self._collect_plugin_tools()
+
+        try:
+            result = await llm.tool_call(messages, available_tools)
+        except Exception:
+            logger.exception("Scheduled LLM call failed")
+            return "Sorry, I couldn't process that scheduled run right now."
+
+        if result.has_tool_calls:
+            tool_results = []
+            for tc in result.tool_calls:
+                func = tc.get("function", tc)
+                tool_name = func.get("name", "")
+                args = func.get("arguments", {})
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except json.JSONDecodeError:
+                        args = {}
+                tool_result = await self._execute_tool(tool_name, args, source, channel_id)
+                tool_results.append(f"[{tool_name}]: {tool_result}")
+
+            tool_summary = "\n".join(tool_results)
+            history.append({"role": "assistant", "content": result.text or ""})
+            history.append({
+                "role": "user",
+                "content": f"Tool results:\n{tool_summary}\n\nSummarize what happened for the user.",
+            })
+            try:
+                final_response = await llm.complete(
+                    [{"role": "system", "content": system_prompt}] + history
+                )
+            except Exception:
+                logger.exception("Scheduled final response generation failed")
+                final_response = tool_summary
+        else:
+            final_response = result.text or "I'm not sure how to help with that."
+
+        if persist_output and final_response:
+            self._append_message(channel_id, "assistant", final_response)
+
+        return final_response
+
+    async def _execute_tool(self, name: str, args: dict, source: str, channel_id: str = "default") -> str:
         """Execute a tool call and return a result string."""
         try:
             match name:
@@ -179,8 +245,10 @@ class AIInterface:
                     return await self._tool_get_price(args)
                 case "list_tasks":
                     return self._tool_list_tasks()
+                case "list_task_handlers":
+                    return self._tool_list_task_handlers()
                 case "create_task":
-                    return await self._tool_create_task(args)
+                    return await self._tool_create_task(args, channel_id=channel_id, source=source)
                 case "delete_task":
                     return await self._tool_delete_task(args)
                 case "get_memories":
@@ -190,7 +258,12 @@ class AIInterface:
                 case "run_analysis":
                     return await self._tool_run_analysis(args)
                 case _:
-                    plugin_result = await self._execute_plugin_tool(name, args, source)
+                    plugin_result = await self._execute_plugin_tool(
+                        name,
+                        args,
+                        source,
+                        channel_id=channel_id,
+                    )
                     if plugin_result is not None:
                         return plugin_result
                     return f"Unknown tool: {name}"
@@ -243,7 +316,13 @@ class AIInterface:
                 existing_names.add(name)
         return tools
 
-    async def _execute_plugin_tool(self, name: str, args: dict, source: str) -> str | None:
+    async def _execute_plugin_tool(
+        self,
+        name: str,
+        args: dict,
+        source: str,
+        channel_id: str = "default",
+    ) -> str | None:
         """Attempt to execute a plugin-provided tool via call_tool()."""
         for plugin in self._iter_plugins():
             call_tool = getattr(plugin, "call_tool", None)
@@ -251,7 +330,13 @@ class AIInterface:
                 continue
             try:
                 try:
-                    result = call_tool(name=name, args=args, source=source, interface=self)
+                    result = call_tool(
+                        name=name,
+                        args=args,
+                        source=source,
+                        channel_id=channel_id,
+                        interface=self,
+                    )
                 except TypeError:
                     result = call_tool(name, args)
                 if isawaitable(result):
@@ -400,6 +485,12 @@ class AIInterface:
 
         return f"No price data available for {ticker}. No live quote returned from configured market data providers."
 
+    def _tool_list_task_handlers(self) -> str:
+        handlers = sorted(self._registry.names("task_handler"))
+        if not handlers:
+            return "No task handlers are currently registered."
+        return "Available task handlers:\n" + "\n".join(f"  - {name}" for name in handlers)
+
     def _tool_list_tasks(self) -> str:
         tasks = self._scheduler.list_tasks()
         if not tasks:
@@ -412,13 +503,38 @@ class AIInterface:
             parts.append(f"  [{t.id}] {t.name} ({t.type}, {status}) schedule: {schedule} by: {t.created_by}")
         return f"{len(tasks)} tasks:\n" + "\n".join(parts)
 
-    async def _tool_create_task(self, args: dict) -> str:
+    async def _tool_create_task(
+        self,
+        args: dict,
+        channel_id: str = "default",
+        source: str = "unknown",
+    ) -> str:
+        handler = args["handler"]
+        if not self._registry.has("task_handler", handler):
+            available = sorted(self._registry.names("task_handler"))
+            if available:
+                return (
+                    f"Cannot create task. Unknown handler '{handler}'. "
+                    f"Use one of: {', '.join(available)}"
+                )
+            return f"Cannot create task. Unknown handler '{handler}' and no handlers are registered."
+
+        params = args.get("params", {})
+        if not isinstance(params, dict):
+            params = {}
+
+        # Default to the same conversation channel where the task was created.
+        params.setdefault("channel_id", channel_id)
+        output_names = set(self._registry.names("output"))
+        if source in output_names:
+            params.setdefault("adapter", source)
+
         task = Task(
             name=args["name"],
             type=args.get("type", "recurring"),
-            handler=args["handler"],
+            handler=handler,
             cron_expression=args.get("cron_expression"),
-            params=args.get("params", {}),
+            params=params,
             created_by="ai",
         )
         if args.get("run_at"):
