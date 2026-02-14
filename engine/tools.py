@@ -166,7 +166,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "create_task",
-            "description": "Create a new scheduled task.",
+            "description": "Create a new scheduled task. For recurring monitoring tasks, prefer handler ai.run_prompt.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -181,7 +181,7 @@ TOOLS = [
                     },
                     "handler": {
                         "type": "string",
-                        "description": "Registered task handler name from list_task_handlers (e.g., ai.run_prompt)",
+                        "description": "Registered task handler name from list_task_handlers (for monitoring prefer ai.run_prompt)",
                     },
                     "cron_expression": {
                         "type": "string",
@@ -193,7 +193,7 @@ TOOLS = [
                     },
                     "params": {
                         "type": "object",
-                        "description": "Parameters to pass to the handler",
+                        "description": "Parameters to pass to the handler. For ai.run_prompt include params.prompt with the per-run execution instruction.",
                     },
                 },
                 "required": ["name", "handler"],
@@ -214,6 +214,23 @@ TOOLS = [
                     },
                 },
                 "required": ["task_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_task_by_name",
+            "description": "Delete scheduled task(s) by name match when the user doesn't provide an ID.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Task name or a unique part of it",
+                    },
+                },
+                "required": ["name"],
             },
         },
     },

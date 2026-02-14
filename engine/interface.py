@@ -37,7 +37,7 @@ You help the user manage their trading activity. You can:
 - Record trades they've skipped (skip_trade)
 - Show portfolio state (get_portfolio)
 - Look up prices (get_price)
-- Manage scheduled tasks (list_tasks, create_task, delete_task)
+- Manage scheduled tasks (list_tasks, create_task, delete_task, delete_task_by_name)
 - List schedulable handlers (list_task_handlers)
 - View learning memories (get_memories)
 - Trigger analysis (run_analysis)
@@ -48,10 +48,24 @@ IMPORTANT RULES:
 - When they ask about their portfolio or positions, use get_portfolio.
 - When they want to skip a signal, use skip_trade and record their reason.
 - Before creating a scheduled task, use list_task_handlers and choose a valid handler name.
+- For recurring monitoring/updates (news checks, periodic watch, alerts), prefer handler `ai.run_prompt` unless the user explicitly asks for another handler.
+- For `ai.run_prompt` tasks, set `params.prompt` to the execution instruction (what to do each run), not to a meta-instruction about creating tasks.
+- If the user asks for news/research/web lookups, call available tools first; do not claim inability before attempting relevant tool calls.
+- If a user clearly asks you to perform an action and a tool can do it, execute it immediately in the same turn.
+- Do not ask for extra confirmation ("ok?", "say do it", "should I proceed?") for routine user-requested actions.
+- For "stop/delete this task" requests, resolve the task via tools (list_tasks/delete_task_by_name/delete_task) and complete the deletion in the same turn when unambiguous.
 - You understand ANY language. Parse the user's intent regardless of what language they write in.
 - Be concise in responses. Don't over-explain.
 - If you're unsure what the user wants, ask for clarification.
 - Always confirm back what action you took after executing a tool."""
+
+SCHEDULED_RUN_PROMPT = """You are running inside a scheduled cron task.
+
+Execution rules:
+- Execute the task objective now using available tools.
+- Do not create/modify/delete tasks unless the prompt explicitly asks you to manage schedules.
+- For news/research requests, call relevant tools before saying data is unavailable.
+- Respond with only the current run update for the user."""
 
 
 class AIInterface:
@@ -84,6 +98,89 @@ class AIInterface:
         })
         self._store.append_conversation_message(channel_id, role, content)
 
+    @staticmethod
+    def _parse_tool_args(raw_args: Any) -> dict:
+        """Normalize tool-call arguments into a dict."""
+        if isinstance(raw_args, dict):
+            return raw_args
+        if isinstance(raw_args, str):
+            try:
+                parsed = json.loads(raw_args)
+            except json.JSONDecodeError:
+                return {}
+            return parsed if isinstance(parsed, dict) else {}
+        return {}
+
+    async def _run_tool_loop(
+        self,
+        llm: LLMProvider,
+        system_prompt: str,
+        history: list[dict[str, str]],
+        source: str,
+        channel_id: str,
+        max_rounds: int = 25,
+    ) -> str:
+        """Run LLM tool-calling until completion, then return final user response."""
+        available_tools = TOOLS + self._collect_plugin_tools()
+        messages: list[dict[str, str]] = [{"role": "system", "content": system_prompt}] + list(history)
+        last_tool_summary = ""
+
+        for _ in range(max_rounds):
+            result = await llm.tool_call(messages, available_tools)
+
+            if not result.has_tool_calls:
+                response = (result.text or "").strip()
+                if response:
+                    return response
+                if last_tool_summary:
+                    try:
+                        return await llm.complete(
+                            messages + [{
+                                "role": "user",
+                                "content": "Provide the final user-facing response now.",
+                            }]
+                        )
+                    except Exception:
+                        logger.exception("Final response generation failed")
+                        return last_tool_summary
+                return "I'm not sure how to help with that."
+
+            if result.text:
+                messages.append({"role": "assistant", "content": result.text})
+
+            tool_results: list[str] = []
+            for tc in result.tool_calls:
+                func = tc.get("function", tc)
+                tool_name = str(func.get("name", ""))
+                args = self._parse_tool_args(func.get("arguments", {}))
+                tool_result = await self._execute_tool(tool_name, args, source, channel_id)
+                tool_results.append(f"[{tool_name}]: {tool_result}")
+
+            last_tool_summary = "\n".join(tool_results) if tool_results else "No tool output."
+            messages.append({
+                "role": "user",
+                "content": (
+                    f"Tool results:\n{last_tool_summary}\n\n"
+                    "If more tool calls are required to complete the user's request, call them now. "
+                    "Otherwise, respond to the user with the completed outcome."
+                ),
+            })
+
+        max_rounds_notice = (
+            "[INTERNAL SYSTEM ERROR] Max tool call rounds reached, "
+            "ask user for confirmation to continue in new message."
+        )
+        messages.append({"role": "user", "content": max_rounds_notice})
+        logger.warning("Max tool-call rounds reached for channel %s", channel_id)
+        try:
+            return await llm.complete(messages)
+        except Exception:
+            logger.exception("Max-rounds fallback response failed")
+            return (
+                "I hit an internal tool-call round limit. "
+                "Reply with confirmation in a new message if you want me to continue."
+            )
+
     async def handle_message(
         self,
         text: str,
@@ -108,60 +205,19 @@ class AIInterface:
             return "No AI provider configured. Please set up an LLM provider in config.yaml."
 
         llm: LLMProvider = providers[0]
-
-        # Build messages with system prompt
-        system_prompt = SYSTEM_PROMPT
-        messages = [{"role": "system", "content": system_prompt}] + history
-        available_tools = TOOLS + self._collect_plugin_tools()
-
-        # Call LLM with tools
         try:
-            result = await llm.tool_call(messages, available_tools)
+            response = await self._run_tool_loop(
+                llm=llm,
+                system_prompt=SYSTEM_PROMPT,
+                history=history,
+                source=source,
+                channel_id=channel_id,
+            )
         except Exception:
             logger.exception("LLM call failed")
             return "Sorry, I couldn't process that right now. Please try again."
-
-        # Process tool calls if any
-        if result.has_tool_calls:
-            tool_results = []
-            for tc in result.tool_calls:
-                func = tc.get("function", tc)
-                tool_name = func.get("name", "")
-                args = func.get("arguments", {})
-                if isinstance(args, str):
-                    try:
-                        args = json.loads(args)
-                    except json.JSONDecodeError:
-                        args = {}
-
-                tool_result = await self._execute_tool(tool_name, args, source, channel_id)
-                tool_results.append(f"[{tool_name}]: {tool_result}")
-
-            # Add tool results to conversation and get final response
-            tool_summary = "\n".join(tool_results)
-            self._append_message(channel_id, "assistant", result.text or "")
-            self._append_message(
-                channel_id,
-                "user",
-                f"Tool results:\n{tool_summary}\n\nSummarize what happened for the user.",
-            )
-            history = self._conversation_history[channel_id]
-
-            try:
-                final_response = await llm.complete(
-                    [{"role": "system", "content": system_prompt}] + history
-                )
-            except Exception:
-                logger.exception("Final response generation failed")
-                final_response = tool_summary
-
-            self._append_message(channel_id, "assistant", final_response)
-            return final_response
-        else:
-            # No tool calls -- direct response
-            response = result.text or "I'm not sure how to help with that."
-            self._append_message(channel_id, "assistant", response)
-            return response
+        self._append_message(channel_id, "assistant", response)
+        return response
 
     async def handle_scheduled_prompt(
         self,
@@ -181,46 +237,19 @@ class AIInterface:
             return "No AI provider configured. Please set up an LLM provider in config.yaml."
 
         llm: LLMProvider = providers[0]
-        system_prompt = SYSTEM_PROMPT
+        system_prompt = f"{SYSTEM_PROMPT}\n\n{SCHEDULED_RUN_PROMPT}"
         history: list[dict[str, str]] = [{"role": "user", "content": prompt}]
-        messages = [{"role": "system", "content": system_prompt}] + history
-        available_tools = TOOLS + self._collect_plugin_tools()
-
         try:
-            result = await llm.tool_call(messages, available_tools)
+            final_response = await self._run_tool_loop(
+                llm=llm,
+                system_prompt=system_prompt,
+                history=history,
+                source=source,
+                channel_id=channel_id,
+            )
         except Exception:
             logger.exception("Scheduled LLM call failed")
             return "Sorry, I couldn't process that scheduled run right now."
-
-        if result.has_tool_calls:
-            tool_results = []
-            for tc in result.tool_calls:
-                func = tc.get("function", tc)
-                tool_name = func.get("name", "")
-                args = func.get("arguments", {})
-                if isinstance(args, str):
-                    try:
-                        args = json.loads(args)
-                    except json.JSONDecodeError:
-                        args = {}
-                tool_result = await self._execute_tool(tool_name, args, source, channel_id)
-                tool_results.append(f"[{tool_name}]: {tool_result}")
-
-            tool_summary = "\n".join(tool_results)
-            history.append({"role": "assistant", "content": result.text or ""})
-            history.append({
-                "role": "user",
-                "content": f"Tool results:\n{tool_summary}\n\nSummarize what happened for the user.",
-            })
-            try:
-                final_response = await llm.complete(
-                    [{"role": "system", "content": system_prompt}] + history
-                )
-            except Exception:
-                logger.exception("Scheduled final response generation failed")
-                final_response = tool_summary
-        else:
-            final_response = result.text or "I'm not sure how to help with that."
 
         if persist_output and final_response:
             self._append_message(channel_id, "assistant", final_response)
@@ -251,6 +280,8 @@ class AIInterface:
                     return await self._tool_create_task(args, channel_id=channel_id, source=source)
                 case "delete_task":
                     return await self._tool_delete_task(args)
+                case "delete_task_by_name":
+                    return await self._tool_delete_task_by_name(args)
                 case "get_memories":
                     return self._tool_get_memories(args)
                 case "get_signals":
@@ -489,7 +520,14 @@ class AIInterface:
         handlers = sorted(self._registry.names("task_handler"))
         if not handlers:
             return "No task handlers are currently registered."
-        return "Available task handlers:\n" + "\n".join(f"  - {name}" for name in handlers)
+        if "ai.run_prompt" in handlers:
+            handlers.remove("ai.run_prompt")
+            handlers.insert(0, "ai.run_prompt")
+        lines = []
+        for name in handlers:
+            suffix = " (recommended for recurring monitoring)" if name == "ai.run_prompt" else ""
+            lines.append(f"  - {name}{suffix}")
+        return "Available task handlers:\n" + "\n".join(lines)
 
     def _tool_list_tasks(self) -> str:
         tasks = self._scheduler.list_tasks()
@@ -523,6 +561,11 @@ class AIInterface:
         if not isinstance(params, dict):
             params = {}
 
+        if handler == "ai.run_prompt":
+            prompt = str(params.get("prompt", "")).strip()
+            if not prompt:
+                return "Cannot create task. Handler 'ai.run_prompt' requires params.prompt."
+
         # Default to the same conversation channel where the task was created.
         params.setdefault("channel_id", channel_id)
         output_names = set(self._registry.names("output"))
@@ -547,6 +590,28 @@ class AIInterface:
         task_id = args["task_id"]
         deleted = await self._scheduler.delete_task(task_id)
         return f"Deleted task {task_id}" if deleted else f"Task {task_id} not found"
+
+    async def _tool_delete_task_by_name(self, args: dict) -> str:
+        query = str(args["name"]).strip().lower()
+        if not query:
+            return "Task name is required."
+
+        tasks = self._scheduler.list_tasks()
+        matches = [t for t in tasks if query in t.name.lower()]
+
+        if not matches:
+            return f"No task matched '{args['name']}'."
+
+        if len(matches) > 1:
+            options = ", ".join(f"{t.name} [{t.id}]" for t in matches[:5])
+            more = "..." if len(matches) > 5 else ""
+            return f"Multiple tasks matched '{args['name']}': {options}{more}. Please be more specific."
+
+        task = matches[0]
+        deleted = await self._scheduler.delete_task(task.id)
+        if not deleted:
+            return f"Task matched ('{task.name}') but could not be deleted."
+        return f"Deleted task '{task.name}' ({task.id})."
 
     def _tool_get_memories(self, args: dict) -> str:
         ticker = args.get("ticker")
