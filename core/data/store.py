@@ -85,14 +85,25 @@ class Store:
                 channel_id TEXT NOT NULL,
                 role TEXT NOT NULL,
                 content TEXT NOT NULL,
+                message_json TEXT,
                 created_at TEXT NOT NULL
             );
 
             CREATE INDEX IF NOT EXISTS idx_conversation_channel_created
                 ON conversation_messages(channel_id, created_at, id);
         """)
+        self._ensure_column("conversation_messages", "message_json", "TEXT")
         self._db.commit()
         logger.info("SQLite initialized at %s", self._db_path)
+
+    def _ensure_column(self, table: str, column: str, definition: str) -> None:
+        """Best-effort schema migration for additive columns."""
+        rows = self.db.execute(f"PRAGMA table_info({table})").fetchall()
+        existing = {str(row["name"]) for row in rows}
+        if column in existing:
+            return
+        self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        self.db.commit()
 
     @property
     def db(self) -> sqlite3.Connection:
@@ -259,26 +270,65 @@ class Store:
     # Conversation history (SQLite)
     # ------------------------------------------------------------------
 
-    def append_conversation_message(self, channel_id: str, role: str, content: str) -> None:
-        """Append one chat message to persistent conversation history."""
+    @staticmethod
+    def _stringify_content(content: object) -> str:
+        if isinstance(content, str):
+            return content
+        try:
+            return json.dumps(content, ensure_ascii=False)
+        except Exception:
+            return str(content)
+
+    def append_conversation_message(
+        self,
+        channel_id: str,
+        role: str,
+        content: object,
+        **extra_fields: object,
+    ) -> None:
+        """Append one chat message to persistent conversation history.
+
+        Stores both legacy text content and a full JSON message payload for
+        spec-compliant role/content/tool_* reconstruction.
+        """
+        payload: dict[str, object] = {
+            "role": role,
+            "content": content,
+        }
+        for key, value in extra_fields.items():
+            if value is not None:
+                payload[str(key)] = value
+
+        content_text = self._stringify_content(content)
+        payload_json = json.dumps(payload, ensure_ascii=False)
         self.db.execute(
-            """INSERT INTO conversation_messages (channel_id, role, content, created_at)
-               VALUES (?, ?, ?, ?)""",
-            (channel_id, role, content, datetime.now().isoformat()),
+            """INSERT INTO conversation_messages (channel_id, role, content, message_json, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (channel_id, role, content_text, payload_json, datetime.now().isoformat()),
         )
         self.db.commit()
 
-    def load_conversation_history(self) -> dict[str, list[dict]]:
+    def load_conversation_history(self) -> dict[str, list[dict[str, object]]]:
         """Load full persisted conversation history for all channels."""
         rows = self.db.execute(
-            """SELECT channel_id, role, content
+            """SELECT channel_id, role, content, message_json
                FROM conversation_messages
                ORDER BY channel_id ASC, created_at ASC, id ASC"""
         ).fetchall()
 
-        history: dict[str, list[dict]] = {}
+        history: dict[str, list[dict[str, object]]] = {}
         for row in rows:
             channel = row["channel_id"]
+            message_json = row["message_json"]
+            if message_json:
+                try:
+                    parsed = json.loads(message_json)
+                except Exception:
+                    parsed = None
+                if isinstance(parsed, dict) and parsed.get("role"):
+                    history.setdefault(channel, []).append(parsed)
+                    continue
+
             history.setdefault(channel, []).append({
                 "role": row["role"],
                 "content": row["content"],

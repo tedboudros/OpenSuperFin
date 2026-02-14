@@ -223,6 +223,29 @@ class SeleniumBrowserHandler:
     def name(self) -> str:
         return "browser.selenium"
 
+    def get_system_prompt_instructions(self) -> str:
+        """Detailed Selenium operating instructions injected into system prompt."""
+        return (
+            "Selenium Browser Playbook:\n"
+            "- Work incrementally with many short tool calls, not one long script.\n"
+            "- Before any browser interaction code, call get_browser_screenshot and get_page_code to inspect current UI state.\n"
+            "- If screenshot payload is truncated, call get_browser_screenshot again with higher max_base64_chars before deciding.\n"
+            "- Use run_selenium_code for one small objective per call (single click, single fill, single submit, or single readback).\n"
+            "- After each state-changing action, call get_browser_screenshot and get_page_code again to verify what changed.\n"
+            "- Prioritize dismissing blockers first (cookie banners, modals, consent overlays, popups) before login/navigation actions.\n"
+            "- Prefer robust selectors and fallback probing over brittle one-shot selectors.\n"
+            "- Keep scripts small and deterministic; avoid long multi-step scripts and avoid hidden assumptions.\n"
+            "- For credentials, never ask for secrets in chat; use list_saved_logins then get_saved_login(profile_id) inside run_selenium_code.\n"
+            "- Never echo or expose credentials, raw tool scaffolding, or internal execution tags."
+        )
+
+    def get_scheduled_prompt_instructions(self) -> str:
+        """Scheduled-run selenium instructions (same playbook plus concise output)."""
+        return (
+            f"{self.get_system_prompt_instructions()}\n"
+            "- In scheduled runs, perform only the requested objective and return a concise status update."
+        )
+
     def get_tools(self) -> list[dict]:
         return [
             {

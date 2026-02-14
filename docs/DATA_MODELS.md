@@ -278,14 +278,22 @@ CREATE TABLE conversation_messages (
     channel_id TEXT NOT NULL,
     role TEXT NOT NULL,
     content TEXT NOT NULL,
+    message_json TEXT,
     created_at TEXT NOT NULL
 );
 ```
+
+`message_json` stores the full chat message payload (spec-shaped dict), enabling
+round-trip persistence of richer message forms (e.g., multimodal content, `tool_calls`,
+`tool_call_id`) while `content` remains as backward-compatible text.
 
 Used by `AIInterface` for:
 - long-term chat continuity
 - first-turn onboarding directive persistence
 - scheduled `ai.run_prompt` context injection (last 10 messages)
+- spec-shaped intermediate tool interactions in normal chat turns:
+  - `role: "assistant"` with `tool_calls`
+  - `role: "tool"` with `tool_call_id` + `content`
 
 ---
 

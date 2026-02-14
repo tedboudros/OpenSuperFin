@@ -57,17 +57,7 @@ IMPORTANT RULES:
 - Do not ask for extra confirmation ("ok?", "say do it", "should I proceed?") for routine user-requested actions.
 - For "stop/delete this task" requests, resolve the task via tools (list_tasks/delete_task_by_name/delete_task) and complete the deletion in the same turn when unambiguous.
 - Response contract for actionable requests: perform tools first, then respond with completed outcome and what changed.
-- Selenium/login safety workflow (when selenium tools are available):
-  - Never ask users to paste credentials into chat for website logins.
-  - First call `list_saved_logins` to discover available credential profile IDs.
-  - Choose the appropriate profile ID, then use `run_selenium_code`.
-  - Inside `run_selenium_code`, use helper `get_saved_login("<profile_id>")` to retrieve username/password during execution.
-  - For browser state validation and blockers (cookie banners, modals, overlays), call `get_browser_screenshot` and `get_page_code`.
-  - `get_browser_screenshot` returns a base64 image payload in tool output; use it to reason about what is visibly blocking interaction.
-  - If screenshot payload is truncated, call `get_browser_screenshot` again with a higher `max_base64_chars`.
-  - Do not print, echo, summarize, or restate credentials in any response.
-  - Do not store credentials in tasks, notes, or message history.
-  - If no matching login profile exists, ask the user to configure selenium saved logins via plugin setup.
+- Follow plugin-specific runtime instructions appended below this prompt when available (enabled plugins only).
 - You understand ANY language. Parse the user's intent regardless of what language they write in.
 - Be concise in responses. Don't over-explain.
 - If you're unsure what the user wants, ask for clarification.
@@ -79,8 +69,7 @@ Execution rules:
 - Execute the task objective now using available tools.
 - Do not create/modify/delete tasks unless the prompt explicitly asks you to manage schedules.
 - For news/research requests, call relevant tools before saying data is unavailable.
-- For selenium login automation, use saved-login workflow (`list_saved_logins`, then `get_saved_login` inside run_selenium_code) and never echo credentials.
-- For selenium visual blockers/interstitials, use `get_browser_screenshot` (base64 payload) plus `get_page_code` to decide next interaction steps.
+- Follow plugin-specific runtime instructions appended below this prompt when available (enabled plugins only).
 - Respond with only the current run update for the user."""
 
 FIRST_CHAT_ONBOARDING_DIRECTIVE = """[INTERNAL ONBOARDING DIRECTIVE]
@@ -128,15 +117,25 @@ class AIInterface:
         self._bus = bus
         self._portfolio = portfolio
         self._scheduler = scheduler
-        self._conversation_history: dict[str, list[dict]] = self._store.load_conversation_history()
+        self._conversation_history: dict[str, list[dict[str, Any]]] = self._store.load_conversation_history()
 
-    def _append_message(self, channel_id: str, role: str, content: str) -> None:
+    def _append_message(self, channel_id: str, role: str, content: Any, **extra_fields: Any) -> None:
         """Append a message to in-memory and persisted history."""
-        self._conversation_history.setdefault(channel_id, []).append({
+        message: dict[str, Any] = {
             "role": role,
             "content": content,
-        })
-        self._store.append_conversation_message(channel_id, role, content)
+        }
+        for key, value in extra_fields.items():
+            if value is not None:
+                message[str(key)] = value
+
+        self._conversation_history.setdefault(channel_id, []).append(message)
+        self._store.append_conversation_message(
+            channel_id=channel_id,
+            role=role,
+            content=content,
+            **extra_fields,
+        )
 
     def _has_persisted_onboarding_directive(self, channel_id: str) -> bool:
         """Return True if onboarding directive already exists in this channel history."""
@@ -171,6 +170,92 @@ class AIInterface:
             return parsed if isinstance(parsed, dict) else {}
         return {}
 
+    @staticmethod
+    def _coerce_instruction_text(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, (list, tuple)):
+            parts = [str(item).strip() for item in value if str(item).strip()]
+            return "\n".join(parts).strip()
+        return str(value).strip()
+
+    def _get_plugin_prompt_instructions(self, plugin: Any, scheduled: bool) -> str:
+        """Read optional prompt instructions from plugin hooks."""
+        context = "scheduled" if scheduled else "chat"
+
+        dynamic = getattr(plugin, "get_prompt_instructions", None)
+        if callable(dynamic):
+            try:
+                return self._coerce_instruction_text(dynamic(context=context))
+            except TypeError:
+                try:
+                    return self._coerce_instruction_text(dynamic())
+                except Exception:
+                    logger.exception(
+                        "Plugin %s get_prompt_instructions failed",
+                        getattr(plugin, "name", "?"),
+                    )
+            except Exception:
+                logger.exception(
+                    "Plugin %s get_prompt_instructions failed",
+                    getattr(plugin, "name", "?"),
+                )
+
+        if scheduled:
+            scheduled_hook = getattr(plugin, "get_scheduled_prompt_instructions", None)
+            if callable(scheduled_hook):
+                try:
+                    text = self._coerce_instruction_text(scheduled_hook())
+                    if text:
+                        return text
+                except Exception:
+                    logger.exception(
+                        "Plugin %s get_scheduled_prompt_instructions failed",
+                        getattr(plugin, "name", "?"),
+                    )
+
+        chat_hook = getattr(plugin, "get_system_prompt_instructions", None)
+        if callable(chat_hook):
+            try:
+                return self._coerce_instruction_text(chat_hook())
+            except Exception:
+                logger.exception(
+                    "Plugin %s get_system_prompt_instructions failed",
+                    getattr(plugin, "name", "?"),
+                )
+
+        return ""
+
+    def _collect_plugin_prompt_sections(self, scheduled: bool) -> list[str]:
+        """Build plugin-specific prompt sections for enabled plugins."""
+        sections: list[str] = []
+        seen: set[tuple[str, str]] = set()
+        for plugin in self._iter_plugins():
+            text = self._get_plugin_prompt_instructions(plugin, scheduled=scheduled)
+            if not text:
+                continue
+            plugin_name = str(getattr(plugin, "name", plugin.__class__.__name__)).strip() or plugin.__class__.__name__
+            key = (plugin_name, text)
+            if key in seen:
+                continue
+            seen.add(key)
+            sections.append(f"[PLUGIN: {plugin_name}]\n{text}")
+        return sections
+
+    def _build_system_prompt(self, scheduled: bool) -> str:
+        """Assemble base prompt + plugin-provided instruction sections."""
+        base = SYSTEM_PROMPT if not scheduled else f"{SYSTEM_PROMPT}\n\n{SCHEDULED_RUN_PROMPT}"
+        sections = self._collect_plugin_prompt_sections(scheduled=scheduled)
+        if not sections:
+            return base
+        return (
+            f"{base}\n\n"
+            "Plugin-specific runtime instructions:\n"
+            + "\n\n".join(sections)
+        )
+
     async def _run_tool_loop(
         self,
         llm: LLMProvider,
@@ -178,6 +263,7 @@ class AIInterface:
         history: list[dict[str, Any]],
         source: str,
         channel_id: str,
+        persist_intermediate_messages: bool = False,
         max_rounds: int = 25,
     ) -> str:
         """Run LLM tool-calling until completion, then return final user response."""
@@ -194,29 +280,57 @@ class AIInterface:
                     return response
                 if last_tool_summary:
                     try:
-                        return await llm.complete(
+                        final = await llm.complete(
                             messages + [{
                                 "role": "user",
                                 "content": "Provide the final user-facing response now.",
                             }]
                         )
+                        final = (final or "").strip()
+                        if final:
+                            return final
+                        return "I ran the requested tools, but couldn't produce a final response."
                     except Exception:
                         logger.exception("Final response generation failed")
-                        return last_tool_summary
+                        return "I ran the requested tools, but couldn't produce a final response."
                 return "I'm not sure how to help with that."
 
-            if result.text:
-                messages.append({"role": "assistant", "content": result.text})
+            assistant_message: dict[str, Any] = {
+                "role": "assistant",
+                "content": result.text or "",
+                "tool_calls": result.tool_calls,
+            }
+            messages.append(assistant_message)
+            if persist_intermediate_messages:
+                self._append_message(
+                    channel_id=channel_id,
+                    role="assistant",
+                    content=result.text or "",
+                    tool_calls=result.tool_calls,
+                )
 
             tool_results: list[str] = []
             multimodal_followups: list[dict[str, Any]] = []
-            for tc in result.tool_calls:
+            for idx, tc in enumerate(result.tool_calls):
                 func = tc.get("function", tc)
                 tool_name = str(func.get("name", ""))
                 args = self._parse_tool_args(func.get("arguments", {}))
+                tool_call_id = str(tc.get("id") or f"{tool_name or 'tool'}_{idx + 1}")
                 raw_tool_result = str(await self._execute_tool(tool_name, args, source, channel_id))
                 summary_tool_result = self._summarize_tool_result_for_text(tool_name, raw_tool_result)
                 tool_results.append(f"[{tool_name}]: {summary_tool_result}")
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": summary_tool_result,
+                })
+                if persist_intermediate_messages:
+                    self._append_message(
+                        channel_id=channel_id,
+                        role="tool",
+                        content=summary_tool_result,
+                        tool_call_id=tool_call_id,
+                    )
                 multimodal_followups.extend(
                     self._build_tool_result_followup_messages(
                         tool_name=tool_name,
@@ -225,14 +339,6 @@ class AIInterface:
                 )
 
             last_tool_summary = "\n".join(tool_results) if tool_results else "No tool output."
-            messages.append({
-                "role": "user",
-                "content": (
-                    f"Tool results:\n{last_tool_summary}\n\n"
-                    "If more tool calls are required to complete the user's request, call them now. "
-                    "Otherwise, respond to the user with the completed outcome."
-                ),
-            })
             messages.extend(multimodal_followups)
 
         max_rounds_notice = (
@@ -283,10 +389,11 @@ class AIInterface:
         try:
             response = await self._run_tool_loop(
                 llm=llm,
-                system_prompt=SYSTEM_PROMPT,
+                system_prompt=self._build_system_prompt(scheduled=False),
                 history=self._conversation_history[channel_id],
                 source=source,
                 channel_id=channel_id,
+                persist_intermediate_messages=True,
             )
         except Exception:
             logger.exception("LLM call failed")
@@ -314,7 +421,7 @@ class AIInterface:
             return "No AI provider configured. Please set up an LLM provider in config.yaml."
 
         llm: LLMProvider = providers[0]
-        system_prompt = f"{SYSTEM_PROMPT}\n\n{SCHEDULED_RUN_PROMPT}"
+        system_prompt = self._build_system_prompt(scheduled=True)
         recent = self._conversation_history.get(channel_id, [])
         context_messages: list[dict[str, str]] = []
         for msg in recent[-10:]:
@@ -332,6 +439,7 @@ class AIInterface:
                 history=history,
                 source=source,
                 channel_id=channel_id,
+                persist_intermediate_messages=False,
             )
         except Exception:
             logger.exception("Scheduled LLM call failed")

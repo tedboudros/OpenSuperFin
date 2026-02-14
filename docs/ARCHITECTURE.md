@@ -131,6 +131,11 @@ Plugins can add tool schemas and execution handlers dynamically via:
 - `get_tools()`
 - `call_tool(...)`
 
+Plugins can also inject runtime prompt guidance via optional hooks:
+- `get_system_prompt_instructions()`
+- `get_scheduled_prompt_instructions()`
+- `get_prompt_instructions(context=...)`
+
 Current plugin tools include:
 - `get_news` (news plugin)
 - `web_search` (web search plugin)

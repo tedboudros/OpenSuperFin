@@ -5,6 +5,7 @@ No SDK dependency. Direct HTTP calls to the Anthropic messages API.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from typing import Any
@@ -162,6 +163,78 @@ class AnthropicProvider:
                 else:
                     system_msg = str(content)
                 continue
+
+            if role == "assistant":
+                tool_calls = msg.get("tool_calls")
+                if isinstance(tool_calls, list) and tool_calls:
+                    blocks: list[dict[str, Any]] = []
+                    normalized = self._normalize_content_for_anthropic(content)
+                    if isinstance(normalized, str):
+                        text = normalized.strip()
+                        if text:
+                            blocks.append({"type": "text", "text": text})
+                    elif isinstance(normalized, list):
+                        for block in normalized:
+                            if isinstance(block, dict) and block.get("type") == "text":
+                                blocks.append(block)
+
+                    for idx, tc in enumerate(tool_calls):
+                        if not isinstance(tc, dict):
+                            continue
+                        func = tc.get("function", tc)
+                        if not isinstance(func, dict):
+                            continue
+                        name = str(func.get("name", "")).strip()
+                        if not name:
+                            continue
+                        tool_id = str(tc.get("id") or f"{name}_{idx + 1}")
+                        raw_args = func.get("arguments", {})
+                        if isinstance(raw_args, str):
+                            try:
+                                parsed_args = json.loads(raw_args)
+                            except Exception:
+                                parsed_args = {}
+                        elif isinstance(raw_args, dict):
+                            parsed_args = raw_args
+                        else:
+                            parsed_args = {}
+                        blocks.append({
+                            "type": "tool_use",
+                            "id": tool_id,
+                            "name": name,
+                            "input": parsed_args if isinstance(parsed_args, dict) else {},
+                        })
+                    user_messages.append({
+                        "role": "assistant",
+                        "content": blocks if blocks else "",
+                    })
+                    continue
+
+            if role == "tool":
+                tool_use_id = str(msg.get("tool_call_id", "")).strip()
+                if not tool_use_id:
+                    tool_use_id = str(msg.get("name", "tool")).strip() or "tool"
+                normalized = self._normalize_content_for_anthropic(content)
+                if isinstance(normalized, list):
+                    text_parts = []
+                    for block in normalized:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            text = str(block.get("text", "")).strip()
+                            if text:
+                                text_parts.append(text)
+                    result_text = "\n".join(text_parts).strip() or str(content)
+                else:
+                    result_text = str(normalized)
+                user_messages.append({
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": tool_use_id,
+                        "content": result_text,
+                    }],
+                })
+                continue
+
             user_messages.append({
                 "role": role,
                 "content": self._normalize_content_for_anthropic(content),

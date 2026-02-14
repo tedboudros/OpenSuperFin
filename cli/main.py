@@ -164,6 +164,56 @@ def _run_repo_update(
     return True
 
 
+def _run_git(repo_root: Path, args: list[str], timeout_seconds: float = 6.0) -> subprocess.CompletedProcess | None:
+    try:
+        return subprocess.run(
+            ["git", *args],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except Exception:
+        return None
+
+
+def _count_commits_behind_upstream(repo_root: Path) -> int | None:
+    """Return how many commits local HEAD is behind upstream; None if unknown."""
+    if not (repo_root / ".git").exists():
+        return None
+
+    # Must have an upstream configured for the current branch.
+    upstream = _run_git(
+        repo_root,
+        ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+        timeout_seconds=3.0,
+    )
+    if upstream is None or upstream.returncode != 0:
+        return None
+
+    # Refresh remote tracking refs best-effort; failures are treated as unknown.
+    fetched = _run_git(repo_root, ["fetch", "--quiet"], timeout_seconds=8.0)
+    if fetched is None or fetched.returncode != 0:
+        return None
+
+    counts = _run_git(repo_root, ["rev-list", "--left-right", "--count", "HEAD...@{u}"], timeout_seconds=3.0)
+    if counts is None or counts.returncode != 0:
+        return None
+
+    raw = counts.stdout.strip()
+    if not raw:
+        return None
+
+    # Output format: "<ahead>\t<behind>"
+    parts = raw.replace("\t", " ").split()
+    if len(parts) < 2:
+        return None
+    try:
+        return int(parts[1])
+    except ValueError:
+        return None
+
+
 def cmd_setup(args: argparse.Namespace) -> None:
     """Run the interactive setup wizard."""
     from cli.setup import run_setup
@@ -178,12 +228,22 @@ def cmd_start(args: argparse.Namespace) -> None:
         print("  No configuration found. Run 'clawquant setup' first.")
         sys.exit(1)
 
-    auto_update, _install_commit = _load_update_preferences(config_path)
+    auto_update, install_commit = _load_update_preferences(config_path)
+    repo_root = _repo_root()
+
+    # Keep recorded install commit aligned with local HEAD.
+    current_commit = _current_repo_commit(repo_root)
+    if current_commit and current_commit != install_commit:
+        _save_install_commit(config_path, current_commit)
+
     if auto_update:
         print("  Auto-update is enabled. Checking for updates...")
-        _run_repo_update(_repo_root(), refresh_dependencies=True, config_path=config_path)
+        _run_repo_update(repo_root, refresh_dependencies=True, config_path=config_path)
     else:
-        print("  Auto-update is disabled. Run 'clawquant update' to pull latest changes.")
+        behind = _count_commits_behind_upstream(repo_root)
+        if behind and behind > 0:
+            noun = "commit" if behind == 1 else "commits"
+            print(f"  Auto-update is disabled. {behind} new {noun} available. Run 'clawquant update'.")
 
     from main import run, setup_logging
     setup_logging("INFO")
