@@ -119,6 +119,7 @@ class AIInterface:
         self._portfolio = portfolio
         self._scheduler = scheduler
         self._conversation_history: dict[str, list[dict[str, Any]]] = self._store.load_conversation_history()
+        self._active_llm_by_channel: dict[str, LLMProvider] = {}
 
     def _append_message(self, channel_id: str, role: str, content: Any, **extra_fields: Any) -> None:
         """Append a message to in-memory and persisted history."""
@@ -273,8 +274,22 @@ class AIInterface:
         if not providers:
             return "No LLM provider configured for screenshot analysis."
 
-        # Prefer a secondary provider when available; otherwise reuse primary.
-        analyzer: LLMProvider = providers[1] if len(providers) > 1 else providers[0]
+        # Use the same active LLM as the main tool loop for this channel.
+        # Fall back to remaining configured providers only if needed.
+        ordered_candidates: list[LLMProvider] = []
+        active = self._active_llm_by_channel.get(channel_id)
+        if active is not None:
+            ordered_candidates.append(active)
+        ordered_candidates.extend(providers)
+
+        analyzers: list[LLMProvider] = []
+        seen_ids: set[int] = set()
+        for candidate in ordered_candidates:
+            cid = id(candidate)
+            if cid in seen_ids:
+                continue
+            seen_ids.add(cid)
+            analyzers.append(candidate)
 
         details: list[str] = [
             "You are a visual browser state analyzer for ClawQuant.",
@@ -314,18 +329,29 @@ class AIInterface:
             },
         ]
 
-        try:
-            analyzed = await analyzer.complete(messages, max_tokens=900, temperature=0.0)
-        except Exception:
-            logger.exception(
-                "Auxiliary image analysis failed (tool=%s source=%s channel=%s)",
-                tool_name,
-                source,
-                channel_id,
-            )
-            return "Screenshot captured, but analysis failed."
-        text = str(analyzed or "").strip()
-        return text or "Screenshot captured, but analysis returned empty output."
+        last_error: Exception | None = None
+        for analyzer in analyzers:
+            try:
+                analyzed = await analyzer.complete(messages)
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "Auxiliary image analysis provider failed (provider=%s tool=%s source=%s channel=%s): %s",
+                    getattr(analyzer, "name", "?"),
+                    tool_name,
+                    source,
+                    channel_id,
+                    exc,
+                )
+                continue
+
+            text = str(analyzed or "").strip()
+            if text:
+                return text
+
+        if last_error is not None:
+            return "Screenshot captured, but analysis failed across all configured LLM providers."
+        return "Screenshot captured, but analysis returned empty output."
 
     async def _run_tool_loop(
         self,
@@ -341,88 +367,93 @@ class AIInterface:
         available_tools = TOOLS + self._collect_plugin_tools()
         messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}] + list(history)
         last_tool_summary = ""
+        self._active_llm_by_channel[channel_id] = llm
+        try:
+            for _ in range(max_rounds):
+                result = await llm.tool_call(messages, available_tools)
 
-        for _ in range(max_rounds):
-            result = await llm.tool_call(messages, available_tools)
+                if not result.has_tool_calls:
+                    response = (result.text or "").strip()
+                    if response:
+                        return response
+                    if last_tool_summary:
+                        try:
+                            final = await llm.complete(
+                                messages + [{
+                                    "role": "user",
+                                    "content": "Provide the final user-facing response now.",
+                                }]
+                            )
+                            final = (final or "").strip()
+                            if final:
+                                return final
+                            return "I ran the requested tools, but couldn't produce a final response."
+                        except Exception:
+                            logger.exception("Final response generation failed")
+                            return "I ran the requested tools, but couldn't produce a final response."
+                    return "I'm not sure how to help with that."
 
-            if not result.has_tool_calls:
-                response = (result.text or "").strip()
-                if response:
-                    return response
-                if last_tool_summary:
-                    try:
-                        final = await llm.complete(
-                            messages + [{
-                                "role": "user",
-                                "content": "Provide the final user-facing response now.",
-                            }]
-                        )
-                        final = (final or "").strip()
-                        if final:
-                            return final
-                        return "I ran the requested tools, but couldn't produce a final response."
-                    except Exception:
-                        logger.exception("Final response generation failed")
-                        return "I ran the requested tools, but couldn't produce a final response."
-                return "I'm not sure how to help with that."
-
-            assistant_message: dict[str, Any] = {
-                "role": "assistant",
-                "content": result.text or "",
-                "tool_calls": result.tool_calls,
-            }
-            messages.append(assistant_message)
-            if persist_intermediate_messages:
-                self._append_message(
-                    channel_id=channel_id,
-                    role="assistant",
-                    content=result.text or "",
-                    tool_calls=result.tool_calls,
-                )
-
-            tool_results: list[str] = []
-            for idx, tc in enumerate(result.tool_calls):
-                func = tc.get("function", tc)
-                tool_name = str(func.get("name", ""))
-                args = self._parse_tool_args(func.get("arguments", {}))
-                tool_call_id = str(tc.get("id") or f"{tool_name or 'tool'}_{idx + 1}")
-                raw_tool_result = str(await self._execute_tool(tool_name, args, source, channel_id))
-                summary_tool_result = self._summarize_tool_result_for_text(tool_name, raw_tool_result)
-                tool_results.append(f"[{tool_name}]: {summary_tool_result}")
-                tool_message_content = self._build_tool_message_content(
-                    tool_name=tool_name,
-                    raw_tool_result=raw_tool_result,
-                    summary_tool_result=summary_tool_result,
-                )
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call_id,
-                    "content": tool_message_content,
-                })
+                assistant_message: dict[str, Any] = {
+                    "role": "assistant",
+                    "content": result.text or "",
+                    "tool_calls": result.tool_calls,
+                }
+                messages.append(assistant_message)
                 if persist_intermediate_messages:
                     self._append_message(
                         channel_id=channel_id,
-                        role="tool",
-                        content=tool_message_content,
-                        tool_call_id=tool_call_id,
+                        role="assistant",
+                        content=result.text or "",
+                        tool_calls=result.tool_calls,
                     )
 
-            last_tool_summary = "\n".join(tool_results) if tool_results else "No tool output."
+                tool_results: list[str] = []
+                for idx, tc in enumerate(result.tool_calls):
+                    func = tc.get("function", tc)
+                    tool_name = str(func.get("name", ""))
+                    args = self._parse_tool_args(func.get("arguments", {}))
+                    tool_call_id = str(tc.get("id") or f"{tool_name or 'tool'}_{idx + 1}")
+                    raw_tool_result = str(await self._execute_tool(tool_name, args, source, channel_id))
+                    summary_tool_result = self._summarize_tool_result_for_text(tool_name, raw_tool_result)
+                    tool_results.append(f"[{tool_name}]: {summary_tool_result}")
+                    tool_message_content = self._build_tool_message_content(
+                        tool_name=tool_name,
+                        raw_tool_result=raw_tool_result,
+                        summary_tool_result=summary_tool_result,
+                    )
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call_id,
+                        "content": tool_message_content,
+                    })
+                    if persist_intermediate_messages:
+                        self._append_message(
+                            channel_id=channel_id,
+                            role="tool",
+                            content=tool_message_content,
+                            tool_call_id=tool_call_id,
+                        )
 
-        max_rounds_notice = (
-            "[INTERNAL SYSTEM ERROR] Max tool call rounds reached, "
-            "ask user for confirmation to continue in new message."
-        )
-        messages.append({"role": "user", "content": max_rounds_notice})
-        logger.warning("Max tool-call rounds reached for channel %s", channel_id)
-        try:
-            return await llm.complete(messages)
-        except Exception:
-            logger.exception("Max-rounds fallback response failed")
-            return (
-                "I hit an internal tool-call round limit. "
-                "Reply with confirmation in a new message if you want me to continue."
+                last_tool_summary = "\n".join(tool_results) if tool_results else "No tool output."
+
+            max_rounds_notice = (
+                "[INTERNAL SYSTEM ERROR] Max tool call rounds reached, "
+                "ask user for confirmation to continue in new message."
             )
+            messages.append({"role": "user", "content": max_rounds_notice})
+            logger.warning("Max tool-call rounds reached for channel %s", channel_id)
+            try:
+                return await llm.complete(messages)
+            except Exception:
+                logger.exception("Max-rounds fallback response failed")
+                return (
+                    "I hit an internal tool-call round limit. "
+                    "Reply with confirmation in a new message if you want me to continue."
+                )
+        finally:
+            current = self._active_llm_by_channel.get(channel_id)
+            if current is llm:
+                self._active_llm_by_channel.pop(channel_id, None)
 
     async def handle_message(
         self,

@@ -78,6 +78,7 @@ async def _load_plugins(config, bus, store, registry, ai_interface: AIInterface)
                 instance = OpenAIProvider(
                     api_key=provider_config.api_key,
                     model=provider_config.model or "gpt-4o",
+                    max_tokens=provider_config.max_tokens,
                     temperature=provider_config.temperature,
                 )
                 registry.register("llm", instance)
@@ -87,6 +88,7 @@ async def _load_plugins(config, bus, store, registry, ai_interface: AIInterface)
                 instance = AnthropicProvider(
                     api_key=provider_config.api_key,
                     model=provider_config.model or "claude-sonnet-4-20250514",
+                    max_tokens=provider_config.max_tokens,
                     temperature=provider_config.temperature,
                 )
                 registry.register("llm", instance)
@@ -96,6 +98,7 @@ async def _load_plugins(config, bus, store, registry, ai_interface: AIInterface)
                 instance = OpenRouterProvider(
                     api_key=provider_config.api_key,
                     model=provider_config.model or "openai/gpt-4o",
+                    max_tokens=provider_config.max_tokens,
                     temperature=provider_config.temperature,
                 )
                 registry.register("llm", instance)
