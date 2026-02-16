@@ -19,6 +19,8 @@ curl -fsSL https://raw.githubusercontent.com/tedboudros/ClawQuant/main/install.s
 
 - **Conversational AI via Telegram + Discord**: one AI interface handles chat, trade confirmations, portfolio queries, and task management.
 - **Multi-step tool loops**: the model can chain multiple tool calls in one turn before replying.
+- **Live signal lifecycle for AI-proposed positions**: `open_potential_position` runs synchronous risk gating and then delivery (`signal.proposed -> signal.approved/rejected -> signal.delivered`).
+- **Signal-ID confirmation tracking**: delivered signals require `confirm_signal(signal_id, entry_price, quantity)` or `skip_signal(signal_id, reason?)`, with one timeout reminder and pending state preserved.
 - **Task scheduling with AI self-invocation**: `ai.run_prompt` lets scheduled jobs run through the same central AI stack.
 - **Built-in schedulers/handlers**: `ai.run_prompt`, `news.briefing`, `notifications.send`, `comparison.weekly`.
 - **Plugin-defined AI tools**: plugins can register tools dynamically (`get_tools` / `call_tool`).
@@ -31,7 +33,7 @@ curl -fsSL https://raw.githubusercontent.com/tedboudros/ClawQuant/main/install.s
 
 ## Coming Soon (Documented Target-State, Not Fully Wired Yet)
 
-- Full autonomous **orchestrator -> risk gate -> signal delivery** production pipeline.
+- Full autonomous **orchestrator-driven** production pipeline from ambient live inputs (without explicit AI tool invocation).
 - Additional integrations described in docs/examples (email/webhook/custom scrapers).
 - Additional market-data providers described in docs/examples (e.g., CoinGecko).
 - Auto-created default recurring learning tasks from config at startup.
@@ -41,10 +43,11 @@ curl -fsSL https://raw.githubusercontent.com/tedboudros/ClawQuant/main/install.s
 
 1. **Message arrives** via Telegram/Discord plugin.
 2. **AI interface runs** with tool-calling (including plugin tools).
-3. **Tools execute** actions (record trades, manage tasks, fetch prices/news/web results).
-4. **Response is published** on `integration.output`.
-5. **Output dispatcher delivers** via the right adapter/channel.
-6. **Scheduler runs tasks** and can invoke the same AI (`ai.run_prompt`).
+3. **Tools execute** actions (including proposing signals, recording confirmations, managing tasks, and fetching prices/news/web results).
+4. **Signal proposals** (when used) pass through deterministic risk gating and adapter delivery.
+5. **Responses/notifications are published** on `integration.output`.
+6. **Output dispatcher delivers** via the right adapter/channel.
+7. **Scheduler runs tasks** and can invoke the same AI (`ai.run_prompt`).
 
 ## Design
 

@@ -30,6 +30,10 @@ class Signal(BaseModel):
     risk_result: RiskResult | None = None
     delivered_at: datetime | None = None
     delivered_via: str | None = None
+    confirmation_status: Literal["pending", "confirmed", "skipped"] | None = None
+    confirmation_due_at: datetime | None = None
+    confirmation_reminder_sent_at: datetime | None = None
+    delivery_errors: list[str] | None = None
 
 
 class Position(BaseModel):

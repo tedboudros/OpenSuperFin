@@ -295,6 +295,7 @@ class TelegramIntegration:
 
         lines = [
             f"{icon} *{signal.direction.upper()} {signal.ticker}*",
+            f"Signal ID: `{signal.id}`",
             f"Confidence: {signal.confidence:.0%}",
         ]
 
@@ -313,5 +314,14 @@ class TelegramIntegration:
         if memo and memo.executive_summary:
             summary = memo.executive_summary[:500]
             lines.append(f"\n{summary}")
+
+        lines.append(
+            "\nTo confirm: `confirm signal "
+            f"{signal.id} entry_price <price> quantity <qty>`"
+        )
+        lines.append(
+            "To skip: `skip signal "
+            f"{signal.id} reason <optional reason>`"
+        )
 
         return "\n".join(lines)

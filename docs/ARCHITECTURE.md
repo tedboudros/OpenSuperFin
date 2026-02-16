@@ -9,6 +9,9 @@ This file separates:
 Current runtime is **chat-first**:
 `integration message -> AI tool loop -> integration.output -> output dispatcher`.
 
+Signal lifecycle is also live for AI-proposed positions:
+`open_potential_position -> signal.proposed -> risk gate -> signal.approved/rejected -> signal.delivered`.
+
 ---
 
 ## Core Design Principles
@@ -48,6 +51,9 @@ graph TB
     subgraph Core
         AI[AI Interface]
         BUS[AsyncIOBus]
+        RISK[RiskEngine]
+        DEL[SignalDeliveryService]
+        REM[PendingConfirmationWatcher]
         SCH[Scheduler]
         OUT[OutputDispatcher]
         REG[PluginRegistry]
@@ -65,6 +71,9 @@ graph TB
     AI --> BT
     AI --> PT
     AI --> BUS
+    BUS --> RISK
+    BUS --> DEL
+    REM --> BUS
     SCH --> TH
     TH --> BUS
     BUS --> OUT
@@ -84,6 +93,9 @@ graph TB
 - `Scheduler`
 - `PortfolioTracker`
 - `AIInterface`
+- `RiskEngine` subscriber (`signal.proposed`)
+- `SignalDeliveryService` subscriber (`signal.approved`)
+- `PendingConfirmationWatcher` loop (overdue pending reminders)
 - `OutputDispatcher` subscribed to `integration.output`
 - `aiohttp` server (`server.py`)
 
@@ -100,7 +112,7 @@ graph TB
   - `web.search`
   - `browser.selenium` (optional, loaded only when `selenium_browser` is enabled)
 
-Risk rules are loaded and registered, but risk-gating events are part of the target-state pipeline (see below).
+Risk rules are loaded and actively evaluated in runtime through `RiskEngine`.
 
 ---
 
@@ -110,8 +122,9 @@ Risk rules are loaded and registered, but risk-gating events are part of the tar
 
 ### Built-in tools
 
-- `confirm_trade`
-- `skip_trade`
+- `open_potential_position`
+- `confirm_signal`
+- `skip_signal`
 - `close_position`
 - `user_initiated_trade`
 - `get_portfolio`
@@ -177,6 +190,7 @@ Scheduled run context order:
 3. task prompt (`params.prompt`)
 
 Result is published as `integration.output` and delivered through the same output dispatcher path as chat.
+If the scheduled AI responds with exactly `[NO_REPLY]`, delivery is skipped for that run.
 
 ---
 
@@ -190,6 +204,8 @@ All outbound user-visible messages are published as `integration.output` events.
 - adapter capability (`send_text`)
 
 This keeps integrations modular and transport-focused.
+
+For approved trade signals, `SignalDeliveryService` uses output adapters' `send(signal, memo=None)` path and then emits `signal.delivered` when at least one adapter succeeds.
 
 ---
 
@@ -238,8 +254,7 @@ This keeps integrations modular and transport-focused.
 The following modules and flows exist conceptually (and partly in code) but are **not the default live runtime path** today:
 
 - `engine/orchestrator.py` as always-on subscriber for live input events
-- `risk/engine.py` active gating of `signal.proposed` events
-- Full signal lifecycle chain in production (`signal.proposed` -> `signal.approved/rejected` -> `signal.delivered`)
+- Fully autonomous ambient orchestrator triggering (without explicit tool invocation)
 - Auto-creation of recurring tasks from config (`scheduler.default_tasks`, `learning.comparison_schedule`)
 - Simulator exposure through CLI/server with validated workflow coverage
 - Additional integrations/providers shown in legacy examples (email/webhook/custom scraper/CoinGecko)
