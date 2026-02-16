@@ -10,6 +10,7 @@ from core.models.events import Event, EventTypes
 from core.models.tasks import TaskResult
 
 logger = logging.getLogger(__name__)
+NO_REPLY_SENTINEL = "[NO_REPLY]"
 
 PLUGIN_META = {
     "name": "ai_runner",
@@ -19,7 +20,7 @@ PLUGIN_META = {
     "protocols": ["task_handler"],
     "class_name": "AIRunnerHandler",
     "pip_dependencies": [],
-    "setup_instructions": "Use handler 'ai.run_prompt' with params.prompt and optional params.channel_id.",
+    "setup_instructions": "Use handler 'ai.run_prompt' with params.prompt and optional params.channel_id. Prompt may return [NO_REPLY] to suppress delivery.",
     "config_fields": [],
 }
 
@@ -34,6 +35,10 @@ class AIRunnerHandler:
     @property
     def name(self) -> str:
         return "ai.run_prompt"
+
+    @staticmethod
+    def _is_no_reply_response(value: str) -> bool:
+        return str(value or "").strip().upper() == NO_REPLY_SENTINEL
 
     async def run(self, params: dict) -> TaskResult:
         prompt = str(params.get("prompt", "")).strip()
@@ -53,6 +58,13 @@ class AIRunnerHandler:
             source=source,
             persist_output=True,
         )
+
+        if self._is_no_reply_response(response):
+            logger.info("ai.run_prompt returned %s; skipping integration.output publish", NO_REPLY_SENTINEL)
+            return TaskResult(
+                status="no_action",
+                message="AI run completed with NO_REPLY; no user notification sent.",
+            )
 
         await self._bus.publish(Event(
             type=EventTypes.INTEGRATION_OUTPUT,

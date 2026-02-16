@@ -84,6 +84,7 @@ class SimulationEngine:
             # Set up risk engine in sandbox
             risk_engine = RiskEngine(
                 bus=sim_bus,
+                store=sim_store,
                 registry=self._registry,
                 portfolio=sim_portfolio,
             )

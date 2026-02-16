@@ -20,7 +20,7 @@ from core.bus import AsyncIOBus
 from core.data.store import Store
 from core.models.events import Event, EventTypes
 from core.models.memories import Memory
-from core.models.signals import Position, Signal
+from core.models.signals import Signal
 from core.models.tasks import Task
 from core.protocols import LLMProvider
 from core.registry import PluginRegistry
@@ -33,8 +33,9 @@ logger = logging.getLogger(__name__)
 SYSTEM_PROMPT = """You are the AI assistant for ClawQuant, a trading advisory system.
 
 You help the user manage their trading activity. You can:
-- Record trades they've made (confirm_trade, close_position, user_initiated_trade)
-- Record trades they've skipped (skip_trade)
+- Propose new trades for deterministic risk gating (open_potential_position)
+- Record signal outcomes (confirm_signal, skip_signal)
+- Record user-managed positions (close_position, user_initiated_trade)
 - Show portfolio state (get_portfolio)
 - Look up prices (get_price)
 - Manage scheduled tasks (list_tasks, create_task, delete_task, delete_task_by_name)
@@ -45,11 +46,14 @@ You help the user manage their trading activity. You can:
 
 IMPORTANT RULES:
 - When the user tells you about a trade they made, use the appropriate tool to record it.
+- Use open_potential_position to propose a trade signal. If risk rejects it, adjust and retry.
+- To confirm a delivered signal, use confirm_signal with signal_id, entry_price, and quantity.
+- To skip a delivered signal, use skip_signal with signal_id.
 - When they ask about their portfolio or positions, use get_portfolio.
-- When they want to skip a signal, use skip_trade and record their reason.
 - Before creating a scheduled task, use list_task_handlers and choose a valid handler name.
 - For recurring monitoring/updates (news checks, periodic watch, alerts), prefer handler `ai.run_prompt` unless the user explicitly asks for another handler.
 - For `ai.run_prompt` tasks, set `params.prompt` to the execution instruction (what to do each run), not to a meta-instruction about creating tasks.
+- In scheduled `ai.run_prompt` executions, you may return exactly `[NO_REPLY]` when no user-facing update is needed.
 - If the user asks for news/research/web lookups, call available tools first; do not claim inability before attempting relevant tool calls.
 - Act-first rule: when the user requests an action that tools can perform, execute the tool calls in the same turn, then report the result.
 - Never send intent-only replies like "Let me check", "I'll do it", or "I can do that" when tools can run now.
@@ -71,6 +75,7 @@ Execution rules:
 - Do not create/modify/delete tasks unless the prompt explicitly asks you to manage schedules.
 - For news/research requests, call relevant tools before saying data is unavailable.
 - Follow plugin-specific runtime instructions appended below this prompt when available (enabled plugins only).
+- If this run should not notify the user, respond with exactly `[NO_REPLY]` and no extra text.
 - Respond with only the current run update for the user."""
 
 FIRST_CHAT_ONBOARDING_DIRECTIVE = """[INTERNAL ONBOARDING DIRECTIVE]
@@ -96,6 +101,7 @@ Output style:
 [/INTERNAL ONBOARDING DIRECTIVE]"""
 
 ONBOARDING_DIRECTIVE_MARKER = "[INTERNAL ONBOARDING DIRECTIVE]"
+NO_REPLY_SENTINEL = "[NO_REPLY]"
 
 
 class AIInterface:
@@ -182,6 +188,10 @@ class AIInterface:
             parts = [str(item).strip() for item in value if str(item).strip()]
             return "\n".join(parts).strip()
         return str(value).strip()
+
+    @staticmethod
+    def _is_no_reply_response(value: str) -> bool:
+        return str(value or "").strip().upper() == NO_REPLY_SENTINEL
 
     def _get_plugin_prompt_instructions(self, plugin: Any, scheduled: bool) -> str:
         """Read optional prompt instructions from plugin hooks."""
@@ -544,6 +554,9 @@ class AIInterface:
             logger.exception("Scheduled LLM call failed")
             return "Sorry, I couldn't process that scheduled run right now."
 
+        if self._is_no_reply_response(final_response):
+            return NO_REPLY_SENTINEL
+
         if persist_output and final_response:
             self._append_message(channel_id, "assistant", final_response)
 
@@ -553,10 +566,12 @@ class AIInterface:
         """Execute a tool call and return a result string."""
         try:
             match name:
-                case "confirm_trade":
-                    return await self._tool_confirm_trade(args, source)
-                case "skip_trade":
-                    return await self._tool_skip_trade(args, source)
+                case "open_potential_position":
+                    return await self._tool_open_potential_position(args, source)
+                case "confirm_signal":
+                    return await self._tool_confirm_signal(args, source)
+                case "skip_signal":
+                    return await self._tool_skip_signal(args, source)
                 case "close_position":
                     return await self._tool_close_position(args, source)
                 case "user_initiated_trade":
@@ -700,51 +715,158 @@ class AIInterface:
     # Tool implementations
     # ------------------------------------------------------------------
 
-    async def _tool_confirm_trade(self, args: dict, source: str) -> str:
-        ticker = args["ticker"].upper()
-        price = args["entry_price"]
-        size = args.get("size")
+    async def _tool_open_potential_position(self, args: dict, source: str) -> str:
+        ticker = str(args["ticker"]).strip().upper()
+        direction = str(args["direction"]).strip().lower()
+        if direction not in ("buy", "sell"):
+            return "direction must be 'buy' or 'sell'."
 
-        # Find the most recent signal for this ticker
-        signals = self._store.list_json("signals", Signal)
-        matching = [s for s in signals if s.ticker == ticker and s.status in ("approved", "delivered")]
+        confidence = float(args["confidence"])
+        entry_target = float(args["entry_target"])
+        if not 0 <= confidence <= 1:
+            return "confidence must be between 0.0 and 1.0."
+        if entry_target <= 0:
+            return "entry_target must be positive."
 
-        if matching:
-            signal = matching[-1]  # most recent
-            pos = self._portfolio.human_confirm_position(
-                signal=signal, entry_price=price, size=size, via=source,
+        signal = Signal(
+            ticker=ticker,
+            direction=direction,
+            catalyst=str(args["catalyst"]).strip(),
+            confidence=confidence,
+            entry_target=entry_target,
+            stop_loss=args.get("stop_loss"),
+            take_profit=args.get("take_profit"),
+            horizon=str(args["horizon"]).strip(),
+            status="proposed",
+        )
+        event = Event(
+            type=EventTypes.SIGNAL_PROPOSED,
+            source="interface",
+            payload={},
+        )
+        signal.correlation_id = event.correlation_id
+        event.payload = signal.model_dump(mode="json")
+        self._store.write_json("signals", f"{signal.id}.json", signal)
+        await self._bus.publish(event)
+
+        resolved = self._store.read_json("signals", f"{signal.id}.json", Signal) or signal
+
+        if resolved.status == "rejected":
+            failed = resolved.risk_result.failed_rules if resolved.risk_result else []
+            if failed:
+                details = "; ".join(f"{rule.rule_name}: {rule.reason}" for rule in failed)
+            else:
+                details = "Risk rules rejected the signal."
+            return (
+                f"Signal rejected [{resolved.id}] {resolved.direction.upper()} {resolved.ticker}: "
+                f"{details}"
             )
-            await self._bus.publish(Event(
-                type=EventTypes.POSITION_CONFIRMED,
-                source="interface",
-                payload={"ticker": ticker, "price": price, "portfolio": "human"},
-            ))
-            return f"Confirmed: {ticker} position opened at ${price:,.2f}" + (f" ({size} units)" if size else "")
-        else:
-            # No matching signal -- treat as user-initiated
-            return await self._tool_user_initiated(
-                {"ticker": ticker, "direction": "long", "entry_price": price, "size": size},
-                source,
+
+        if resolved.status == "delivered":
+            due_text = resolved.confirmation_due_at.isoformat() if resolved.confirmation_due_at else "unknown"
+            return (
+                f"Signal delivered [{resolved.id}] {resolved.direction.upper()} {resolved.ticker} "
+                f"entry_target=${resolved.entry_target or 0:,.2f}, confidence={resolved.confidence:.0%}. "
+                f"Confirmation status: pending (due: {due_text})."
             )
 
-    async def _tool_skip_trade(self, args: dict, source: str) -> str:
-        ticker = args["ticker"].upper()
-        reason = args.get("reason", "")
+        if resolved.status == "approved":
+            errors = "; ".join(resolved.delivery_errors or [])
+            detail = f" Delivery errors: {errors}" if errors else ""
+            return (
+                f"Signal approved but not delivered [{resolved.id}] {resolved.direction.upper()} "
+                f"{resolved.ticker}.{detail}"
+            )
 
-        signals = self._store.list_json("signals", Signal)
-        matching = [s for s in signals if s.ticker == ticker and s.status in ("approved", "delivered")]
+        return (
+            f"Signal created [{resolved.id}] with status={resolved.status}. "
+            "Risk evaluation did not complete as expected."
+        )
 
-        if matching:
-            signal = matching[-1]
-            self._portfolio.human_skip_position(signal=signal, via=source, notes=reason)
-            await self._bus.publish(Event(
-                type=EventTypes.POSITION_SKIPPED,
-                source="interface",
-                payload={"ticker": ticker, "reason": reason},
-            ))
-            return f"Skipped: {ticker} signal." + (f" Reason: {reason}" if reason else "")
-        else:
-            return f"No pending signal found for {ticker}."
+    async def _tool_confirm_signal(self, args: dict, source: str) -> str:
+        signal_id = str(args["signal_id"]).strip()
+        signal = self._store.read_json("signals", f"{signal_id}.json", Signal)
+        if signal is None:
+            return f"Signal not found: {signal_id}"
+
+        if signal.status != "delivered":
+            return f"Signal {signal_id} is not delivered (current status: {signal.status})."
+        if signal.confirmation_status != "pending":
+            return (
+                f"Signal {signal_id} is not pending confirmation "
+                f"(current confirmation_status: {signal.confirmation_status})."
+            )
+
+        entry_price = float(args["entry_price"])
+        quantity = float(args["quantity"])
+        if entry_price <= 0:
+            return "entry_price must be positive."
+        if quantity <= 0:
+            return "quantity must be positive."
+
+        self._portfolio.human_confirm_position(
+            signal=signal,
+            entry_price=entry_price,
+            size=quantity,
+            via=source,
+        )
+        signal.confirmation_status = "confirmed"
+        self._store.write_json("signals", f"{signal.id}.json", signal)
+
+        await self._bus.publish(Event(
+            type=EventTypes.POSITION_CONFIRMED,
+            source="interface",
+            payload={
+                "signal_id": signal.id,
+                "ticker": signal.ticker,
+                "entry_price": entry_price,
+                "quantity": quantity,
+                "portfolio": "human",
+            },
+        ))
+
+        return (
+            f"Confirmed signal {signal.id}: {signal.ticker} at ${entry_price:,.2f} "
+            f"for quantity {quantity}."
+        )
+
+    async def _tool_skip_signal(self, args: dict, source: str) -> str:
+        signal_id = str(args["signal_id"]).strip()
+        reason = str(args.get("reason", "")).strip()
+
+        signal = self._store.read_json("signals", f"{signal_id}.json", Signal)
+        if signal is None:
+            return f"Signal not found: {signal_id}"
+
+        if signal.status != "delivered":
+            return f"Signal {signal_id} is not delivered (current status: {signal.status})."
+        if signal.confirmation_status != "pending":
+            return (
+                f"Signal {signal_id} is not pending confirmation "
+                f"(current confirmation_status: {signal.confirmation_status})."
+            )
+
+        self._portfolio.human_skip_position(
+            signal=signal,
+            via=source,
+            notes=reason or None,
+        )
+        signal.confirmation_status = "skipped"
+        self._store.write_json("signals", f"{signal.id}.json", signal)
+
+        await self._bus.publish(Event(
+            type=EventTypes.POSITION_SKIPPED,
+            source="interface",
+            payload={
+                "signal_id": signal.id,
+                "ticker": signal.ticker,
+                "reason": reason,
+                "portfolio": "human",
+            },
+        ))
+        if reason:
+            return f"Skipped signal {signal.id} ({signal.ticker}). Reason: {reason}"
+        return f"Skipped signal {signal.id} ({signal.ticker})."
 
     async def _tool_close_position(self, args: dict, source: str) -> str:
         ticker = args["ticker"].upper()
@@ -967,7 +1089,12 @@ class AIInterface:
 
         parts = []
         for s in signals:
-            parts.append(f"  [{s.status}] {s.direction.upper()} {s.ticker} conf={s.confidence:.0%} ({s.created_at.strftime('%Y-%m-%d')})")
+            confirmation = s.confirmation_status or "n/a"
+            parts.append(
+                f"  [{s.status}] id={s.id} {s.direction.upper()} {s.ticker} "
+                f"conf={s.confidence:.0%} confirmation={confirmation} "
+                f"({s.created_at.strftime('%Y-%m-%d')})"
+            )
         return f"{len(parts)} signals:\n" + "\n".join(parts)
 
     async def _tool_run_analysis(self, args: dict) -> str:

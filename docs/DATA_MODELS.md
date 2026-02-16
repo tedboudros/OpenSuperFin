@@ -53,11 +53,11 @@ class Event(BaseModel):
 | `memory.created` | Yes | Yes (when comparison creates memory) |
 | `context.assembled` | Yes | Target-state path |
 | `memo.created` | Yes | Target-state path |
-| `signal.proposed` | Yes | Target-state path |
-| `signal.approved` | Yes | Target-state path |
-| `signal.rejected` | Yes | Target-state path |
-| `signal.delivered` | Yes | Target-state path |
-| `alert.triggered` | Yes | Target-state path |
+| `signal.proposed` | Yes | Yes (via `open_potential_position`) |
+| `signal.approved` | Yes | Yes |
+| `signal.rejected` | Yes | Yes |
+| `signal.delivered` | Yes | Yes |
+| `alert.triggered` | Yes | Yes (delivery failures) |
 | `simulation.started/completed` | Yes | Not emitted by current simulation module |
 
 ---
@@ -116,9 +116,13 @@ class Signal(BaseModel):
     risk_result: RiskResult | None
     delivered_at: datetime | None
     delivered_via: str | None
+    confirmation_status: Literal["pending", "confirmed", "skipped"] | None
+    confirmation_due_at: datetime | None
+    confirmation_reminder_sent_at: datetime | None
+    delivery_errors: list[str] | None
 ```
 
-Status fields are valid and persisted; however, in default live runtime the full orchestrator/risk delivery lifecycle is not the primary wired path.
+Signal lifecycle fields are actively used in runtime for tool-driven proposals and confirmation tracking.
 
 ---
 

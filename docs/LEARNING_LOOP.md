@@ -11,6 +11,10 @@ This doc describes what is implemented today and what is still target-state.
 - Dual portfolio files:
   - `positions/ai/*.json`
   - `positions/human/*.json`
+- Signal confirmation lifecycle:
+  - `confirm_signal(signal_id, entry_price, quantity)`
+  - `skip_signal(signal_id, reason?)`
+  - one-time pending reminder after `position_tracking.confirmation_timeout`
 - Comparison task handler: `comparison.weekly`
 - Memory generation model + storage:
   - JSON files in `memories/`
@@ -20,7 +24,7 @@ This doc describes what is implemented today and what is still target-state.
 ### Not fully wired / coming soon
 
 - Automatic scheduling from `learning.comparison_schedule`
-- Automatic assumed-execution timeout flow from `position_tracking.confirmation_timeout`
+- Automatic assumed-execution timeout flow (timeout currently reminders-only, remains pending)
 - Broker sync path for human portfolio
 - Full live orchestrator context-pack loop that routinely feeds memories into every production decision
 
@@ -32,14 +36,14 @@ This doc describes what is implemented today and what is still target-state.
 
 - Stored in `~/.clawquant/positions/ai/`
 - Intended to represent system-side execution tracking
-- In the default chat-first runtime, this portfolio is mainly updated where risk/orchestrator flows are explicitly invoked (target-state path), not by everyday chat tasking alone
+- In the default chat-first runtime, this portfolio is updated when AI uses `open_potential_position` and signals pass risk approval
 
 ### Human Portfolio (actual)
 
 - Stored in `~/.clawquant/positions/human/`
 - Updated directly by AI tools such as:
-  - `confirm_trade`
-  - `skip_trade`
+  - `confirm_signal`
+  - `skip_signal`
   - `close_position`
   - `user_initiated_trade`
 

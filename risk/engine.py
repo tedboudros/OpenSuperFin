@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 
 from core.bus import AsyncIOBus
+from core.data.store import Store
 from core.models.events import Event, EventTypes
 from core.models.signals import RiskResult, RuleEvaluation, Signal
 from core.registry import PluginRegistry
@@ -28,10 +29,12 @@ class RiskEngine:
     def __init__(
         self,
         bus: AsyncIOBus,
+        store: Store,
         registry: PluginRegistry,
         portfolio: PortfolioTracker,
     ) -> None:
         self._bus = bus
+        self._store = store
         self._registry = registry
         self._portfolio = portfolio
 
@@ -73,8 +76,10 @@ class RiskEngine:
             # APPROVED -- open position in AI portfolio, publish approved event
             signal.status = "approved"
             signal.risk_result = result
+            signal.delivery_errors = None
 
             self._portfolio.ai_open_position(signal)
+            self._store.write_json("signals", f"{signal.id}.json", signal)
 
             approved_event = event.derive(
                 type=EventTypes.SIGNAL_APPROVED,
@@ -94,6 +99,7 @@ class RiskEngine:
             # REJECTED
             signal.status = "rejected"
             signal.risk_result = result
+            self._store.write_json("signals", f"{signal.id}.json", signal)
 
             rejected_event = event.derive(
                 type=EventTypes.SIGNAL_REJECTED,

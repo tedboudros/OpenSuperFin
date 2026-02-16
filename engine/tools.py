@@ -8,8 +8,8 @@ TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "confirm_trade",
-            "description": "User confirms they executed a trade that was signaled. Records the position in the human portfolio.",
+            "name": "open_potential_position",
+            "description": "Propose a new trade signal for synchronous risk evaluation and delivery lifecycle handling.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -17,37 +17,90 @@ TOOLS = [
                         "type": "string",
                         "description": "The ticker symbol (e.g., NVDA, BTC-USD, AAPL)",
                     },
-                    "entry_price": {
-                        "type": "number",
-                        "description": "The price at which the user entered the trade",
+                    "direction": {
+                        "type": "string",
+                        "enum": ["buy", "sell"],
+                        "description": "Proposed signal direction",
                     },
-                    "size": {
+                    "catalyst": {
+                        "type": "string",
+                        "description": "Why this position is being proposed",
+                    },
+                    "confidence": {
                         "type": "number",
-                        "description": "Number of units/shares/coins bought (optional)",
+                        "description": "Signal confidence from 0.0 to 1.0",
+                    },
+                    "entry_target": {
+                        "type": "number",
+                        "description": "Target entry price for the signal",
+                    },
+                    "stop_loss": {
+                        "type": "number",
+                        "description": "Optional stop-loss price",
+                    },
+                    "take_profit": {
+                        "type": "number",
+                        "description": "Optional take-profit price",
+                    },
+                    "horizon": {
+                        "type": "string",
+                        "description": "Expected holding period (e.g., 1-3 months)",
                     },
                 },
-                "required": ["ticker", "entry_price"],
+                "required": [
+                    "ticker",
+                    "direction",
+                    "catalyst",
+                    "confidence",
+                    "entry_target",
+                    "horizon",
+                ],
             },
         },
     },
     {
         "type": "function",
         "function": {
-            "name": "skip_trade",
-            "description": "User decides to skip/reject a signaled trade. Records the skip with the user's reason.",
+            "name": "confirm_signal",
+            "description": "Confirm a delivered signal using explicit signal_id, entry price, and quantity.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "ticker": {
+                    "signal_id": {
                         "type": "string",
-                        "description": "The ticker symbol of the signal being skipped",
+                        "description": "Signal identifier (e.g., sig_ab12cd34ef56)",
+                    },
+                    "entry_price": {
+                        "type": "number",
+                        "description": "Actual executed entry price",
+                    },
+                    "quantity": {
+                        "type": "number",
+                        "description": "Executed position quantity (required)",
+                    },
+                },
+                "required": ["signal_id", "entry_price", "quantity"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "skip_signal",
+            "description": "Skip a delivered signal using its signal_id.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "signal_id": {
+                        "type": "string",
+                        "description": "Signal identifier (e.g., sig_ab12cd34ef56)",
                     },
                     "reason": {
                         "type": "string",
-                        "description": "Why the user is skipping this trade",
+                        "description": "Optional reason for skipping",
                     },
                 },
-                "required": ["ticker"],
+                "required": ["signal_id"],
             },
         },
     },
@@ -193,7 +246,7 @@ TOOLS = [
                     },
                     "params": {
                         "type": "object",
-                        "description": "Parameters to pass to the handler. For ai.run_prompt include params.prompt with the per-run execution instruction.",
+                        "description": "Parameters to pass to the handler. For ai.run_prompt include params.prompt with the per-run execution instruction. A run can return exactly [NO_REPLY] to skip user notification.",
                     },
                 },
                 "required": ["name", "handler"],

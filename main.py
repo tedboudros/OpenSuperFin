@@ -18,10 +18,14 @@ from aiohttp import web
 from core.bus import AsyncIOBus
 from core.config import load_config
 from core.data.store import Store
+from core.duration import parse_duration
 from core.models.events import Event, EventTypes
 from core.output_dispatcher import OutputDispatcher
 from core.registry import PluginRegistry
 from engine.interface import AIInterface
+from engine.pending_confirmation import PendingConfirmationWatcher
+from engine.signal_delivery import SignalDeliveryService
+from risk.engine import RiskEngine
 from risk.portfolio import PortfolioTracker
 from scheduler.runner import Scheduler
 from server import create_app
@@ -438,6 +442,26 @@ async def run(config_path: str | None = None, env_path: str | None = None) -> No
     await _load_plugins(config, bus, store, registry, ai_interface)
     logger.info("Plugin registry: %s", registry.summary())
 
+    # Wire risk, signal delivery, and pending-confirmation lifecycle services.
+    _risk_engine = RiskEngine(
+        bus=bus,
+        store=store,
+        registry=registry,
+        portfolio=portfolio,
+    )
+    confirmation_timeout = parse_duration(config.position_tracking.confirmation_timeout)
+    _signal_delivery = SignalDeliveryService(
+        bus=bus,
+        store=store,
+        registry=registry,
+        confirmation_timeout=confirmation_timeout,
+    )
+    pending_confirmation = PendingConfirmationWatcher(
+        bus=bus,
+        store=store,
+        check_interval_seconds=60,
+    )
+
     # Generic integration.output delivery pipeline (adapter-agnostic)
     output_dispatcher = OutputDispatcher(registry=registry)
     bus.subscribe(EventTypes.INTEGRATION_OUTPUT, output_dispatcher.handle_integration_output)
@@ -453,6 +477,7 @@ async def run(config_path: str | None = None, env_path: str | None = None) -> No
 
     # Start scheduler
     await scheduler.start()
+    await pending_confirmation.start()
 
     # Start server
     runner = web.AppRunner(app)
@@ -474,6 +499,7 @@ async def run(config_path: str | None = None, env_path: str | None = None) -> No
         pass
     finally:
         logger.info("Shutting down...")
+        await pending_confirmation.stop()
         await scheduler.stop()
 
         # Stop all input integrations (dedupe because adapters can implement input+output)
